@@ -1862,6 +1862,44 @@ function persistCliSessionId(cliSessionId: string): void {
   }
 }
 
+/** How long to wait before re-checking whether a submit-not-confirmed message
+ *  eventually landed. Cold-start sessions and slow third-party hooks
+ *  (UserPromptSubmit, SessionStart — e.g. superpowers' large skill injection)
+ *  can defer Claude's jsonl append by 5–15s; a 20s deferred recheck covers
+ *  both without being so long that a true failure goes unsurfaced. */
+const SUBMIT_DEFERRED_RECHECK_MS = 20_000;
+
+/** Worker-side handler for `submitted: false`. Defers the user-facing
+ *  warning and runs the adapter-supplied `recheck` closure first; if the
+ *  message has shown up in the transcript by then (slow path, hook delay),
+ *  suppresses the warning entirely. Adapters without a recheck still fall
+ *  through to the warning after the same delay so the UX is uniform. */
+function scheduleSubmitFailureNotify(
+  msg: string,
+  recheck: (() => boolean | Promise<boolean>) | undefined,
+  transcriptLabel: string,
+): void {
+  const preview = msg.length > 60 ? msg.slice(0, 60) + '…' : msg;
+  log(`writeInput: submit not confirmed after retries — deferred ${SUBMIT_DEFERRED_RECHECK_MS}ms recheck queued. preview="${preview}"`);
+  setTimeout(async () => {
+    if (recheck) {
+      try {
+        if (await recheck()) {
+          log(`Deferred recheck found submit in ${transcriptLabel} — suppressing warning. preview="${preview}"`);
+          return;
+        }
+      } catch (err: any) {
+        log(`Deferred recheck threw (${err?.message ?? err}); falling through to warning.`);
+      }
+    }
+    log(`Deferred recheck still missing — notifying user. preview="${preview}"`);
+    send({
+      type: 'user_notify',
+      message: `⚠️ 刚才那条消息发给 ${cliName()} 后没能确认提交（重试 Enter 后等了 ${Math.round(SUBMIT_DEFERRED_RECHECK_MS / 1000)}s 仍未在${transcriptLabel}里看到新记录）。可能卡在输入框里——请去 Web 终端看一下，手动按 Enter 或重发。\n开头：${preview}`,
+    });
+  }, SUBMIT_DEFERRED_RECHECK_MS);
+}
+
 /**
  * Drain the pending message queue sequentially.
  * Async with isFlushing mutex: awaits each writeInput, then immediately
@@ -1929,12 +1967,7 @@ async function flushPending(): Promise<void> {
         if (codexBridgeActive) codexBridgeNotifyCliSessionId(result.cliSessionId);
       }
       if (result && result.submitted === false) {
-        const preview = msg.length > 60 ? msg.slice(0, 60) + '…' : msg;
-        log(`writeInput: submit not confirmed after retries — notifying user. preview="${preview}"`);
-        send({
-          type: 'user_notify',
-          message: `⚠️ 刚才那条消息发给 ${cliName()} 后没能确认提交（重试 Enter 3 次仍未在会话 JSONL 中看到新记录）。可能卡在输入框里——请去 Web 终端看一下，手动按 Enter 或重发。\n开头：${preview}`,
-        });
+        scheduleSubmitFailureNotify(msg, result.recheck, '会话 JSONL');
       }
       // Bridge fallback: stop after one writeInput. Subsequent submits
       // would be type-ahead'd into Claude's queue, which jsonl records as
@@ -2774,12 +2807,7 @@ process.on('message', async (raw: unknown) => {
                 codexBridgeNotifyCliSessionId(result.cliSessionId);
               }
               if (result && result.submitted === false) {
-                const preview = content.length > 60 ? content.slice(0, 60) + '…' : content;
-                log(`Codex adopt writeInput: submit not confirmed after retries — notifying user. preview="${preview}"`);
-                send({
-                  type: 'user_notify',
-                  message: `⚠️ 刚才那条消息发给 ${cliName()} 后没能确认提交（重试 Enter 3 次仍未在 Codex history 中看到新记录）。可能卡在输入框里——请去 Web 终端看一下，手动按 Enter 或重发。\n开头：${preview}`,
-                });
+                scheduleSubmitFailureNotify(content, result.recheck, 'Codex history');
               }
             } catch (err: any) {
               log(`Codex adopt writeInput error: ${err.message}`);

@@ -549,6 +549,40 @@ describe('claude-code writeInput submission confirmation', () => {
     expect(result).toBeUndefined();
     expect(pty.claudeJsonlPath).toBe(newPath);
   });
+
+  it('returns a recheck closure that recognises a slow-path submit (e.g. UserPromptSubmit hook delay)', async () => {
+    // Simulates Claude where the in-band 4×800ms confirm budget runs out
+    // (Enter sent, jsonl still empty), then a slow UserPromptSubmit hook
+    // finally lets the user line land. The deferred recheck must spot it
+    // and let the worker suppress the false-failure warning.
+    const cwd = '/tmp/recheck-deferred';
+    const sessionId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const pinnedPath = makeJsonlForSession('recheck-deferred', sessionId, cwd);
+    writeClaudePidFile(31337, { sessionId, cwd });
+
+    const adapter = createClaudeCodeAdapter('/bin/claude');
+    const pty: PtyHandle = {
+      claudeJsonlPath: pinnedPath,
+      cliPid: 31337,
+      cliCwd: cwd,
+      write: vi.fn(),
+      sendText: vi.fn(),
+      sendSpecialKeys: vi.fn(),  // No append on Enter — simulates hook still running
+    };
+
+    const result = await adapter.writeInput(pty, 'slow hook still running');
+    expect(result).toMatchObject({ submitted: false });
+    const recheck = (result as any)?.recheck as () => boolean;
+    expect(typeof recheck).toBe('function');
+    expect(recheck()).toBe(false);  // Still nothing in the jsonl
+
+    // Hook eventually lets the user line land in the pinned path.
+    appendFileSync(
+      pinnedPath,
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'slow hook still running' } }) + '\n',
+    );
+    expect(recheck()).toBe(true);  // Now the worker suppresses the warning
+  });
 });
 
 describe('codex writeInput submission confirmation', () => {
@@ -620,7 +654,12 @@ describe('codex writeInput submission confirmation', () => {
     const adapter = createCodexAdapter('/bin/codex');
     const result = await adapter.writeInput(pty, MULTILINE);
 
-    expect(result).toEqual({ submitted: false });
+    expect(result).toMatchObject({ submitted: false });
+    // Deferred recheck closure surfaces slow-path submits to the worker
+    // (cold-start / heavy UserPromptSubmit hook) so they don't false-warn;
+    // before any append it must report the submit still missing.
+    expect(typeof (result as any)?.recheck).toBe('function');
+    expect((result as any).recheck()).toBe(false);
     expect(pty.sendText).toHaveBeenCalledWith(MULTILINE);
     expect(pty.sendSpecialKeys).toHaveBeenCalledTimes(4);
   });

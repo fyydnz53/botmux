@@ -414,7 +414,36 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
       // so the worker can notify the user in Lark instead of silently dropping.
       // We still surface observedCliSessionId so the worker can persist Claude's
       // current id even when this particular submit didn't land.
-      return buildResult(false);
+      //
+      // Attach a recheck closure: the in-band budget (4 × 800ms) is too short
+      // for cold-start sessions and for environments where a slow third-party
+      // UserPromptSubmit / SessionStart hook (e.g. superpowers) defers Claude's
+      // jsonl append by 5–15s. The worker calls recheck() after a delay, and
+      // suppresses the user-facing warning when the line shows up by then.
+      const recheck = (): boolean => {
+        if (!submitFingerprint) return false;
+        // Latest pid → path; covers post-failure rotations (/clear, /resume).
+        if (pty.cliPid && pty.cliCwd) {
+          const resolved = resolveJsonlFromPid(pty.cliPid, pty.cliCwd);
+          if (resolved) applyResolved(resolved);
+        }
+        const currentPath = pty.claudeJsonlPath;
+        if (currentPath && jsonlContainsFingerprint(currentPath, submitFingerprint, { includeQueueOperations: true })) {
+          return true;
+        }
+        // Fan out to sibling jsonls in the project dir (excluding the pinned
+        // path which we already checked). Same minMtime guard as the in-band
+        // fingerprint fallback so a stale historical match can't suppress.
+        const searchPath = currentPath ?? pty.claudeJsonlPath;
+        if (!searchPath) return false;
+        const matched = findJsonlContainingFingerprint(dirname(searchPath), submitFingerprint, {
+          excludePath: searchPath,
+          minMtimeMs: submitSearchMinMtime,
+          includeQueueOperations: true,
+        });
+        return !!matched;
+      };
+      return { ...buildResult(false), recheck };
     },
 
     completionPattern: COMPLETION_RE,

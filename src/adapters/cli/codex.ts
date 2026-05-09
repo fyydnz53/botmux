@@ -175,7 +175,12 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
           ? { submitted: true, cliSessionId: match.cliSessionId }
           : undefined;
       }
-      return { submitted: false };
+      // In-band budget exhausted. Hand the worker a recheck closure: a
+      // slow-startup Codex (or one whose first turn is delayed by a heavy
+      // initial prompt) may still append our marker after the retries gave
+      // up, and the worker re-scans on a delay before warning the user.
+      const recheck = (): boolean => matchHistoryDelta(HISTORY_PATH, baseByte, marker).found;
+      return { submitted: false, recheck };
     },
 
     completionPattern: undefined,

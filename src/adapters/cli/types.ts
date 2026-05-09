@@ -51,8 +51,22 @@ export interface CliAdapter {
    *  Return value is optional: adapters that can verify the submit (e.g. Claude
    *  Code via session JSONL) return `{ submitted: false }` when all retries
    *  failed, so the worker can surface that to the user. `void` / undefined
-   *  means "no verification performed, assume OK". */
-  writeInput(pty: PtyHandle, content: string): Promise<void | { submitted: boolean; cliSessionId?: string }>;
+   *  means "no verification performed, assume OK".
+   *
+   *  When `submitted === false`, adapters may attach a `recheck` closure that
+   *  re-scans the transcript on demand. The worker calls it after a delay so
+   *  slow-path submits (cold-start, slow UserPromptSubmit hooks, busy disk)
+   *  that landed *after* the in-band retry budget exhausted are recognised
+   *  and the user_notify warning is suppressed. The closure must be cheap
+   *  and idempotent — worker may invoke it multiple times. */
+  writeInput(
+    pty: PtyHandle,
+    content: string,
+  ): Promise<void | {
+    submitted: boolean;
+    cliSessionId?: string;
+    recheck?: () => boolean | Promise<boolean>;
+  }>;
 
   /** Optional: absolute path (with ~ expansion handled by caller) to the CLI's
    *  skill directory.  When set, `ensureSkills` will write/refresh skill files
