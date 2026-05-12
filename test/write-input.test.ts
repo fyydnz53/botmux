@@ -10,11 +10,15 @@
  *   newlines into separate submits.
  * - Claude Code (raw PTY): keeps the explicit \x1b[200~...\x1b[201~ wrapping
  *   since we control the markers directly there.
- * - All other adapters (Aiden/CoCo/Codex/Gemini/OpenCode): use plain
- *   sendText + Enter in tmux, or write(content) + \r in raw mode. The whole
- *   content (including newlines) is sent in one sendText call — tmux
- *   `send-keys -l` preserves LF, and CoCo/others treat LF as a newline, not
- *   submit (Enter/CR is what triggers submit).
+ * - CoCo (tmux): same as Claude Code — CoCo is a Claude Code fork (Ink TUI)
+ *   and the old "single sendText with embedded LF" path silently dropped
+ *   submits because tmux `send-keys -l` treats \n as Enter and paste-burst
+ *   detection swallowed the trailing Enter. After the 2026-05 fix CoCo
+ *   types per-line via sendText + `\` + Enter soft-newlines and verifies
+ *   via ~/.cache/coco/history.jsonl.
+ * - Other adapters (Aiden/Codex/Gemini/OpenCode): use plain sendText + Enter
+ *   in tmux, or write(content) + \r in raw mode. The whole content (including
+ *   newlines) is sent in one sendText call — those CLIs tolerate raw LF.
  *
  * Run:  pnpm vitest run test/write-input.test.ts
  */
@@ -46,6 +50,7 @@ import { dirname, join } from 'node:path';
 // ---------------------------------------------------------------------------
 
 const CODEX_HISTORY_PATH = join(homedir(), '.codex', 'history.jsonl');
+const COCO_HISTORY_PATH = join(homedir(), '.cache', 'coco', 'history.jsonl');
 
 function appendCodexHistory(content: string, sessionId?: string): void {
   mkdirSync(dirname(CODEX_HISTORY_PATH), { recursive: true });
@@ -55,6 +60,16 @@ function appendCodexHistory(content: string, sessionId?: string): void {
 function resetCodexHistory(): void {
   mkdirSync(dirname(CODEX_HISTORY_PATH), { recursive: true });
   writeFileSync(CODEX_HISTORY_PATH, '');
+}
+
+function appendCocoHistory(content: string): void {
+  mkdirSync(dirname(COCO_HISTORY_PATH), { recursive: true });
+  appendFileSync(COCO_HISTORY_PATH, JSON.stringify({ content, mode: 'user', timestamp: new Date().toISOString() }) + '\n');
+}
+
+function resetCocoHistory(): void {
+  mkdirSync(dirname(COCO_HISTORY_PATH), { recursive: true });
+  writeFileSync(COCO_HISTORY_PATH, '');
 }
 
 function makeTmuxPty(opts?: { confirmCodexSubmit?: boolean; codexSessionId?: string }) {
@@ -91,17 +106,23 @@ function makeRawPty(opts?: { confirmCodexSubmit?: boolean; codexSessionId?: stri
 
 type AdapterEntry = [string, CliAdapter];
 
-/** Adapters that use plain sendText+Enter (tmux) / write+CR (raw) — i.e. everyone except Claude Code. */
+/** Adapters that use plain sendText+Enter (tmux) / write+CR (raw) — Aiden,
+ *  Codex, Gemini, OpenCode. (Claude Code and CoCo type per-line; tested below.) */
 const PLAIN_ADAPTERS: AdapterEntry[] = [
   ['aiden', createAidenAdapter('/bin/aiden')],
-  ['coco', createCocoAdapter('/bin/coco')],
   ['codex', createCodexAdapter('/bin/codex')],
   ['gemini', createGeminiAdapter('/bin/gemini')],
   ['opencode', createOpenCodeAdapter('/bin/opencode')],
 ];
 
-const ALL_ADAPTERS: AdapterEntry[] = [
+/** Adapters that share Claude Code's per-line + soft-newline typing path. */
+const HUMAN_TYPING_ADAPTERS: AdapterEntry[] = [
   ['claude-code', createClaudeCodeAdapter('/bin/claude')],
+  ['coco', createCocoAdapter('/bin/coco')],
+];
+
+const ALL_ADAPTERS: AdapterEntry[] = [
+  ...HUMAN_TYPING_ADAPTERS,
   ...PLAIN_ADAPTERS,
 ];
 
@@ -110,16 +131,7 @@ const ALL_ADAPTERS: AdapterEntry[] = [
 // =========================================================================
 
 describe('writeInput: single-line, tmux mode', () => {
-  it.each(PLAIN_ADAPTERS)('%s: sendText + Enter', async (_name, adapter) => {
-    const pty = makeTmuxPty();
-    await adapter.writeInput(pty, 'hello world');
-    expect(pty.sendText).toHaveBeenCalledWith('hello world');
-    expect(pty.sendSpecialKeys).toHaveBeenCalledWith('Enter');
-    expect(pty.pasteText).not.toHaveBeenCalled();
-  });
-
-  it('claude-code: sendText + Enter (human-typing, no pasteText)', async () => {
-    const adapter = createClaudeCodeAdapter('/bin/claude');
+  it.each(ALL_ADAPTERS)('%s: sendText + Enter, no pasteText', async (_name, adapter) => {
     const pty = makeTmuxPty();
     await adapter.writeInput(pty, 'hello world');
     expect(pty.sendText).toHaveBeenCalledWith('hello world');
@@ -167,13 +179,12 @@ describe('writeInput: multiline, tmux mode', () => {
     expect(pty.pasteText).not.toHaveBeenCalled();
   });
 
-  it('claude-code: sendText per-line + `\\` + Enter for soft newlines, no pasteText', async () => {
+  it.each(HUMAN_TYPING_ADAPTERS)('%s: sendText per-line + `\\` + Enter for soft newlines, no pasteText', async (_name, adapter) => {
     // 'first line\n\nSession ID: abc-123' splits into 3 lines: non-empty, empty, non-empty.
     // Expected calls (in order):
     //   sendText('first line'), sendText('\\'), sendSpecialKeys('Enter')   ← soft-newline 1
     //   sendText('\\'), sendSpecialKeys('Enter')                            ← soft-newline 2 (skip empty content)
     //   sendText('Session ID: abc-123'), sendSpecialKeys('Enter')           ← submit
-    const adapter = createClaudeCodeAdapter('/bin/claude');
     const pty = makeTmuxPty();
     await adapter.writeInput(pty, MULTILINE);
     expect(pty.pasteText).not.toHaveBeenCalled();
@@ -193,8 +204,7 @@ describe('writeInput: multiline, non-tmux mode', () => {
     expect(allWritten).toBe(MULTILINE + '\r');
   });
 
-  it('claude-code: wraps in bracketed paste + CR', async () => {
-    const adapter = createClaudeCodeAdapter('/bin/claude');
+  it.each(HUMAN_TYPING_ADAPTERS)('%s: wraps in bracketed paste + CR', async (_name, adapter) => {
     const pty = makeRawPty();
     await adapter.writeInput(pty, MULTILINE);
     const allWritten = pty.write.mock.calls.map(c => c[0]).join('');
@@ -219,8 +229,7 @@ describe('writeInput: multiline preserves unicode and session IDs', () => {
     expect(pty.sendSpecialKeys).toHaveBeenLastCalledWith('Enter');
   });
 
-  it('claude-code: each non-empty line round-trips via sendText (tmux)', async () => {
-    const adapter = createClaudeCodeAdapter('/bin/claude');
+  it.each(HUMAN_TYPING_ADAPTERS)('%s: each non-empty line round-trips via sendText (tmux)', async (_name, adapter) => {
     const pty = makeTmuxPty();
     const followUp = '帮我看看\n\nSession ID: dece91fd-abc';
     await adapter.writeInput(pty, followUp);
@@ -238,6 +247,10 @@ describe('writeInput: multiline preserves unicode and session IDs', () => {
 describe('supportsTypeAhead flag', () => {
   it('claude-code: true', () => {
     expect(createClaudeCodeAdapter('/bin/claude').supportsTypeAhead).toBe(true);
+  });
+
+  it('coco: undefined (input handling is fork of claude-code but type-ahead untested)', () => {
+    expect(createCocoAdapter('/bin/coco').supportsTypeAhead).toBeUndefined();
   });
 
   it.each(PLAIN_ADAPTERS)('%s: undefined (default behavior)', (_name, adapter) => {
@@ -662,5 +675,108 @@ describe('codex writeInput submission confirmation', () => {
     expect((result as any).recheck()).toBe(false);
     expect(pty.sendText).toHaveBeenCalledWith(MULTILINE);
     expect(pty.sendSpecialKeys).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('coco writeInput submission confirmation', () => {
+  // CoCo's typing path is per-line (soft-newline like Claude Code), so a
+  // PTY mock that records "submittedText" off the LAST sendText sees only
+  // the trailing line — not useful for content-prefix matching against
+  // history.jsonl. We capture every sendText call and reconstruct the full
+  // submission once we see Enter, then append a coco-shaped history line
+  // when configured to confirm.
+  // Reconstructs the multiline content from per-line sendText calls. Real
+  // coco does this internally (Ink input buffer): every literal sendText
+  // line becomes a content segment, `\` sentinels followed by Enter become
+  // \n separators. On the final Enter the whole buffer is appended to
+  // history.jsonl as a single `"content":"…"` field.
+  function reconstructFromCalls(calls: string[]): string {
+    let buf = '';
+    let pendingBackslash = false;
+    for (const c of calls) {
+      if (c === '\\') {
+        // Consecutive `\\` (no segment in between): commit the prior pending
+        // newline before starting a new one. This is what coco does for a
+        // blank line in the middle of multiline content.
+        if (pendingBackslash) buf += '\n';
+        pendingBackslash = true;
+        continue;
+      }
+      if (pendingBackslash) { buf += '\n'; pendingBackslash = false; }
+      buf += c;
+    }
+    if (pendingBackslash) buf += '\n';
+    return buf;
+  }
+
+  function makeCocoTmuxPty(opts?: { confirmCocoSubmit?: boolean }) {
+    const confirmCocoSubmit = opts?.confirmCocoSubmit ?? true;
+    const captured: string[] = [];
+    let submittedOnce = false;
+    let pendingBackslashAtEnter = false;
+    return {
+      write: vi.fn(),
+      sendText: vi.fn((text: string) => {
+        captured.push(text);
+        if (text === '\\') pendingBackslashAtEnter = true;
+        else pendingBackslashAtEnter = false;
+      }),
+      sendSpecialKeys: vi.fn((key: string) => {
+        if (key !== 'Enter') return;
+        if (pendingBackslashAtEnter) { pendingBackslashAtEnter = false; return; }
+        if (!confirmCocoSubmit || submittedOnce) return;
+        submittedOnce = true;
+        appendCocoHistory(reconstructFromCalls(captured));
+      }),
+      pasteText: vi.fn(),
+    } satisfies PtyHandle;
+  }
+
+  it('confirms a multiline submit when history.jsonl appends the escaped prompt marker', async () => {
+    resetCocoHistory();
+    appendCocoHistory('seed prior submit so file exists');
+    const adapter = createCocoAdapter('/bin/coco');
+    const pty = makeCocoTmuxPty();
+    const result = await adapter.writeInput(pty, MULTILINE);
+
+    // Successful submit returns undefined (no warning needed)
+    expect(result).toBeUndefined();
+    // Per-line typing: 'first line', then `\` Enter `\` Enter (soft-newlines
+    // for the blank line in the middle), then 'Session ID: abc-123', then
+    // the final submit Enter. Exactly 3 Enter calls — any extra would be
+    // a retry from the verify loop, which means the mock didn't actually
+    // confirm the submit.
+    expect(pty.sendText).toHaveBeenCalledWith('first line');
+    expect(pty.sendText).toHaveBeenCalledWith('Session ID: abc-123');
+    const enterCalls = pty.sendSpecialKeys.mock.calls.filter(c => c[0] === 'Enter').length;
+    expect(enterCalls).toBe(3);  // 2 soft-newlines + final submit, no retries
+  });
+
+  it('retries Enter and reports failure when history.jsonl never records the prompt', async () => {
+    resetCocoHistory();
+    appendCocoHistory('seed prior submit so file exists');
+    const adapter = createCocoAdapter('/bin/coco');
+    const pty = makeCocoTmuxPty({ confirmCocoSubmit: false });
+    const result = await adapter.writeInput(pty, MULTILINE);
+
+    expect(result).toMatchObject({ submitted: false });
+    expect(typeof (result as any)?.recheck).toBe('function');
+    expect((result as any).recheck()).toBe(false);
+    // 2 soft-newline Enters + initial submit Enter + 3 retries = 6 Enter calls
+    const enterCalls = pty.sendSpecialKeys.mock.calls.filter(c => c[0] === 'Enter').length;
+    expect(enterCalls).toBe(6);
+  });
+
+  it('skips verification on fresh install with no history.jsonl yet', async () => {
+    // No appendCocoHistory call → file doesn't exist in memfs.
+    // Adapter should trust the Enter and return undefined rather than
+    // false-warning, since brand-new coco installs have no history.jsonl
+    // until the first submit lands.
+    const { rmSync } = await import('node:fs');
+    try { rmSync(COCO_HISTORY_PATH); } catch { /* may not exist */ }
+    const adapter = createCocoAdapter('/bin/coco');
+    const pty = makeCocoTmuxPty({ confirmCocoSubmit: false });
+    const result = await adapter.writeInput(pty, 'hello');
+    expect(result).toBeUndefined();
   });
 });

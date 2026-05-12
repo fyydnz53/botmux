@@ -100,24 +100,36 @@ describe('CoCo adapter: buildArgs', () => {
   });
 });
 
-describe('CoCo adapter: writeInput', () => {
+describe('CoCo adapter: writeInput (raw PTY path)', () => {
   const adapter = createCocoAdapter();
 
-  it('sends content + \\r', async () => {
+  // Exhaustive coverage of the writeInput path (tmux soft-newline, history
+  // verification, recheck closure) lives in test/write-input.test.ts under
+  // an fs mock so behavior is deterministic. Here we only spot-check the
+  // raw-PTY wire format: bracketed-paste body followed by one-or-more Enter
+  // (\r) writes. The number of Enters depends on whether
+  // ~/.cache/coco/history.jsonl exists in the test env — present (typical
+  // dev box) → 1 initial + 3 retries = 4 \r; absent (CI sandbox) → 1 \r
+  // after the fresh-install short-wait. Either is fine.
+  it('wraps content in bracketed paste + at least one Enter', async () => {
     const written: string[] = [];
     const mock = { write: (d: string) => written.push(d) };
 
     await adapter.writeInput(mock, 'hello world');
-    expect(written).toEqual(['hello world\r']);
-  });
+    expect(written[0]).toBe('\x1b[200~hello world\x1b[201~');
+    expect(written.slice(1).every(w => w === '\r')).toBe(true);
+    expect(written.filter(w => w === '\r').length).toBeGreaterThanOrEqual(1);
+  }, 15_000);
 
-  it('empty content still sends \\r', async () => {
+  it('empty content still sends at least one Enter', async () => {
     const written: string[] = [];
     const mock = { write: (d: string) => written.push(d) };
 
     await adapter.writeInput(mock, '');
-    expect(written).toEqual(['\r']);
-  });
+    expect(written[0]).toBe('\x1b[200~\x1b[201~');
+    expect(written.slice(1).every(w => w === '\r')).toBe(true);
+    expect(written.filter(w => w === '\r').length).toBeGreaterThanOrEqual(1);
+  }, 15_000);
 });
 
 describe('CoCo adapter: properties', () => {
