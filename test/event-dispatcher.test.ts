@@ -96,12 +96,14 @@ function makeHandlers(): EventHandlers & {
   handleThreadReply: ReturnType<typeof vi.fn>;
   handleCardAction: ReturnType<typeof vi.fn>;
   isSessionOwner: ReturnType<typeof vi.fn>;
+  onChatModeConverted: ReturnType<typeof vi.fn>;
 } {
   return {
     handleCardAction: vi.fn(async () => undefined),
     handleNewTopic: vi.fn(async () => {}),
     handleThreadReply: vi.fn(async () => {}),
     isSessionOwner: vi.fn(() => false),
+    onChatModeConverted: vi.fn(),
   };
 }
 
@@ -529,7 +531,10 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       chatType: 'group',
       mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
     });
-    mockGetChatMode.mockResolvedValueOnce('group'); // 普通群
+    // mockResolvedValue (sticky), not Once: dispatcher reverifies via
+    // forceRefresh getChatMode when isSessionOwner=true at scope='chat', so
+    // both the routing call and the reverify call must return 'group' here.
+    mockGetChatMode.mockResolvedValue('group'); // 普通群
     handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-fallback-1');
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
@@ -612,6 +617,243 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     await capturedHandlers['im.message.receive_v1'](event);
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+});
+
+describe('im.message.receive_v1 — stale chat-scope detection (group → topic conversion)', () => {
+  // Lark lets group admins flip chat_mode 'group' ↔ 'topic' on the fly. A
+  // botmux chat-scope session built while a chat was 普通群 keeps `scope='chat'`
+  // forever; after the chat becomes 话题群, dispatch via sendMessage(chatId)
+  // makes Lark wrap every reply into a fresh topic — the user's actual bug
+  // report. The fix: when scope='chat' AND we own a session at the chat, the
+  // dispatcher force-refreshes chat_mode; if it flipped to 'topic', the stale
+  // chat-scope session is evicted and the new message is routed as thread-scope
+  // anchored at its own messageId, so handleNewTopic seeds a fresh thread.
+  let handlers: ReturnType<typeof makeHandlers>;
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    setupBotState();
+    handlers = makeHandlers();
+    _resetBotMentionDedup();
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  });
+
+  it('reroutes to thread-scope when chat-scope session is stale (chat now topic-mode)', async () => {
+    // Cache says 'group' (legacy), forceRefresh reveals 'topic' (current truth).
+    mockGetChatMode.mockImplementation(async (_appId: string, _chatId: string, options?: { forceRefresh?: boolean }) => {
+      return options?.forceRefresh ? 'topic' : 'group';
+    });
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-converted');
+
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA first message after switch' }),
+      messageId: 'msg-after-conv',
+      chatId: 'chat-converted',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    // Reroutes: scope='thread', anchor=messageId → handleNewTopic seeds a new
+    // thread session, NOT handleThreadReply on the stale chat-scope owner.
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'msg-after-conv',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    // Daemon notified so it can evict the stale chat-scope session.
+    expect(handlers.onChatModeConverted).toHaveBeenCalledWith('chat-converted', MY_APP_ID);
+  });
+
+  it('keeps chat-scope when reverify confirms still 普通群 (no conversion)', async () => {
+    mockGetChatMode.mockResolvedValue('group'); // both calls return 'group'
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-stable');
+
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA still 普通群' }),
+      messageId: 'msg-stable',
+      chatId: 'chat-stable',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-stable',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.onChatModeConverted).not.toHaveBeenCalled();
+  });
+
+  it('does NOT forceRefresh when no chat-scope session exists (no API waste)', async () => {
+    mockGetChatMode.mockResolvedValue('group');
+    handlers.isSessionOwner.mockReturnValue(false); // no chat-scope session
+    // Clear mock history so we measure only this test's getChatMode calls
+    // (vitest doesn't auto-reset between tests within a file).
+    mockGetChatMode.mockClear();
+
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA fresh chat' }),
+      messageId: 'msg-fresh',
+      chatId: 'chat-fresh',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    const forceRefreshCalls = mockGetChatMode.mock.calls.filter(
+      ([, , options]) => (options as { forceRefresh?: boolean } | undefined)?.forceRefresh === true,
+    );
+    expect(forceRefreshCalls).toHaveLength(0);
+    expect(handlers.onChatModeConverted).not.toHaveBeenCalled();
+  });
+});
+
+describe('im.message.receive_v1 — stale topic detection (topic → group conversion)', () => {
+  // Symmetric to the forward case: when a 话题群 is flipped back to 普通群,
+  // chat_mode webhook signal isn't pushed and the dispatcher's 5-min cache
+  // can keep returning 'topic' long after the flip. Without a guard, every
+  // new top-level message routes thread-scope (anchor=messageId) and the
+  // bot replies via reply_in_thread=true — which Lark renders as a fresh
+  // topic even in the now-flat 普通群. The fix: when routing landed on
+  // thread-scope purely from cached chat_mode (anchor==messageId AND the
+  // message has no real thread_id), force-refresh once; on 'group', flatten
+  // to chat-scope so the reply lands as a plain group message.
+  let handlers: ReturnType<typeof makeHandlers>;
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    setupBotState();
+    handlers = makeHandlers();
+    _resetBotMentionDedup();
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  });
+
+  it('reroutes to chat-scope when cached topic is stale (chat now group-mode)', async () => {
+    // Cache says 'topic' (legacy), forceRefresh reveals 'group' (current truth).
+    mockGetChatMode.mockImplementation(async (_appId: string, _chatId: string, options?: { forceRefresh?: boolean }) => {
+      return options?.forceRefresh ? 'group' : 'topic';
+    });
+    handlers.isSessionOwner.mockReturnValue(false);
+
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA top-level after flip-back' }),
+      messageId: 'msg-after-flipback',
+      chatId: 'chat-flipback',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    // Reroutes: scope='chat', anchor=chatId → bot replies via sendMessage(chatId),
+    // not replyMessage(messageId, reply_in_thread=true).
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-flipback',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('keeps thread-scope when reverify confirms still 话题群 (no flip-back)', async () => {
+    // Both cache and forceRefresh agree: still 'topic'. Reverse-check fires
+    // (one API call) but routing is preserved — this is the legitimate "new
+    // topic seed in 话题群" path and must continue working.
+    mockGetChatMode.mockResolvedValue('topic');
+    handlers.isSessionOwner.mockReturnValue(false);
+
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA new topic seed' }),
+      messageId: 'msg-topic-seed',
+      chatId: 'chat-still-topic',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'msg-topic-seed',
+      larkAppId: MY_APP_ID,
+    }));
+  });
+
+  it('does NOT forceRefresh when message has a real thread_id (existing topic reply)', async () => {
+    // Reply *inside* an existing thread in 话题群: message carries both
+    // root_id and thread_id. decideRouting returns thread-scope anchored at
+    // root_id (not messageId), so the reverse check must skip — there's no
+    // ambiguity here and a force-refresh would be wasted API.
+    mockGetChatMode.mockResolvedValue('topic');
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'root-existing-topic');
+    mockGetChatMode.mockClear();
+
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA reply inside existing topic' }),
+      messageId: 'msg-reply-in-topic',
+      rootId: 'root-existing-topic',
+      threadId: 'omt_existing',
+      chatId: 'chat-topic',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    const forceRefreshCalls = mockGetChatMode.mock.calls.filter(
+      ([, , options]) => (options as { forceRefresh?: boolean } | undefined)?.forceRefresh === true,
+    );
+    expect(forceRefreshCalls).toHaveLength(0);
+    // Routing stays anchored at the real thread root.
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'root-existing-topic',
+    }));
+  });
+
+  it('lets /t still force a topic seed after reverse-flatten (compatibility)', async () => {
+    // User typed `@BotA /t …` top-level in a 话题群-flipped-to-普通群. Reverse
+    // check flattens routing to chat-scope, then /t override flips it back to
+    // thread-scope anchored at messageId — exactly the behaviour /t promises.
+    mockGetChatMode.mockImplementation(async (_appId: string, _chatId: string, options?: { forceRefresh?: boolean }) => {
+      return options?.forceRefresh ? 'group' : 'topic';
+    });
+    handlers.isSessionOwner.mockReturnValue(false);
+
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA /t open new topic' }),
+      messageId: 'msg-flipback-t',
+      chatId: 'chat-flipback-t',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'msg-flipback-t',
+      larkAppId: MY_APP_ID,
+    }));
   });
 });
 

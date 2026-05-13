@@ -10,7 +10,7 @@ import * as oncallStore from '../services/oncall-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry } from './worker-pool.js';
-import { replyMessage, sendMessage } from '../im/lark/client.js';
+import { getChatMode, replyMessage, sendMessage } from '../im/lark/client.js';
 import { resumeSession } from './session-manager.js';
 import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { locateLimiter } from './dashboard-locate.js';
@@ -151,7 +151,10 @@ ipcRoute('POST', '/api/sessions/:sessionId/resume', async (_req, res, params) =>
   const notice = JSON.stringify({ text: `🔄 会话已通过命令行恢复，发条消息继续与 ${cliName} 对话。` });
   if (ds.larkAppId) {
     if (ds.scope === 'chat' && ds.chatId) {
-      sendMessage(ds.larkAppId, ds.chatId, notice, 'text')
+      getChatMode(ds.larkAppId, ds.chatId, { forceRefresh: true })
+        .then((mode) => mode === 'topic' && ds.session.rootMessageId
+          ? replyMessage(ds.larkAppId, ds.session.rootMessageId, notice, 'text', true)
+          : sendMessage(ds.larkAppId, ds.chatId, notice, 'text'))
         .catch(err => logger.debug(`[resume] failed to post chat-scope resume notice: ${err}`));
     } else if (ds.session.rootMessageId) {
       replyMessage(ds.larkAppId, ds.session.rootMessageId, notice, 'text', true)

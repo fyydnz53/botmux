@@ -675,7 +675,7 @@ export async function executeScheduledTask(
     allBots[0];
   const larkAppId = bot.config.larkAppId;
 
-  const { sendMessage, replyMessage } = await import('../im/lark/client.js');
+  const { getChatMode, sendMessage, replyMessage } = await import('../im/lark/client.js');
 
   // Scope resolution — explicit task.scope wins; otherwise fall back to legacy
   // semantics (rootMessageId present → thread, absent → chat). Restoring an
@@ -703,9 +703,20 @@ export async function executeScheduledTask(
   let isContinuation = false;
 
   if (scope === 'chat') {
-    // Cross-target chat-scope (rare): a creator-thread notification + a fresh
-    // chat post in target. We use task.chatId as the runtime anchor.
-    if (task.creatorRootMessageId && task.creatorChatId !== task.chatId) {
+    // A group may have been converted from 普通群 to 话题群 after the schedule
+    // was created. In topic mode, a top-level sendMessage creates a new topic;
+    // keep scheduled continuations in the original thread when we have one.
+    const chatMode = await getChatMode(larkAppId, task.chatId, { forceRefresh: true });
+    if (chatMode === 'topic' && task.rootMessageId) {
+      try {
+        await replyMessage(larkAppId, task.rootMessageId, `🕐 定时任务「${task.name}」开始执行`, 'text', true);
+        anchor = task.rootMessageId;
+        isContinuation = true;
+      } catch (err: any) {
+        logger.warn(`[scheduler] Failed to reply in converted topic chat ${task.rootMessageId} (${err.message}); falling back to new thread`);
+        anchor = await sendMessage(larkAppId, task.chatId, `🕐 定时任务「${task.name}」开始执行`);
+      }
+    } else if (task.creatorRootMessageId && task.creatorChatId !== task.chatId) {
       const creatorAppId = task.creatorLarkAppId ?? larkAppId;
       replyMessage(
         creatorAppId,
@@ -783,11 +794,14 @@ export async function executeScheduledTask(
 
   // Spawn a fresh session bound to the chosen anchor.
   // Thread-scope: rootMessageId = anchor. Chat-scope: rootMessageId stores the
-  // chatId-as-seed for audit (sessionAnchorId() returns chatId via scope).
+  // chatId-as-seed for audit (sessionAnchorId() returns chatId via scope). If a
+  // formerly chat-scope task was redirected into a converted topic chat, promote
+  // the runtime session to thread-scope so follow-up replies stay in-thread.
+  const runtimeScope: 'thread' | 'chat' = scope === 'chat' && anchor !== task.chatId ? 'thread' : scope;
   const session = sessionStore.createSession(task.chatId, anchor, `[定时] ${task.name}`);
   const now = Date.now();
   session.larkAppId = larkAppId;
-  session.scope = scope;
+  session.scope = runtimeScope;
   session.lastMessageAt = new Date(now).toISOString();
   sessionStore.updateSession(session);
   messageQueue.ensureQueue(anchor);
@@ -802,7 +816,7 @@ export async function executeScheduledTask(
     larkAppId,
     chatId: task.chatId,
     chatType: task.chatType === 'p2p' ? 'p2p' : 'group',
-    scope,
+    scope: runtimeScope,
     spawnedAt: sessionCreatedAtMs(session),
     cliVersion: getCurrentCliVersion(),
     lastMessageAt: now,

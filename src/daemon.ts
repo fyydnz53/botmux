@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config } from './config.js';
-import { replyMessage, resolveAllowedUsers, sendMessage } from './im/lark/client.js';
+import { getChatMode, replyMessage, resolveAllowedUsers, sendMessage } from './im/lark/client.js';
 import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, isChatOncallBoundForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
@@ -104,8 +104,13 @@ async function sessionReply(anchor: string, content: string, msgType: string = '
   if (!appId) throw new Error('No bot configured');
 
   // Chat-scope: post a plain message to the chat. No reply_in_thread → keeps
-  // the conversation flat in 普通群 / p2p. The card layer carries chatId in
-  // its button values, so handleCardAction routes back via sessionKey(chatId).
+  // the conversation flat in 普通群. The card layer carries chatId in its button
+  // values, so handleCardAction routes back via sessionKey(chatId).
+  //
+  // If a 普通群 is converted to a 话题群 while this chat-scope session is alive,
+  // a top-level sendMessage would create a brand-new topic for every reply.
+  // Force-refresh chat_mode at dispatch time and fall back to the session's
+  // original triggering message as the thread anchor.
   //
   // Detect chat-scope from either ds.scope or anchor's `oc_` prefix. The
   // prefix fallback covers the close-button race: card-handler deletes ds
@@ -113,7 +118,15 @@ async function sessionReply(anchor: string, content: string, msgType: string = '
   // the time we run, ds is gone — but the anchor (chatId, oc_xxx) is enough
   // to know we should sendMessage, not reply_in_thread to a non-message-id.
   if (ds?.scope === 'chat' || anchor.startsWith('oc_')) {
-    return sendMessage(appId, ds?.chatId ?? anchor, content, msgType);
+    const chatId = ds?.chatId ?? anchor;
+    if (ds?.scope === 'chat' && ds.session.rootMessageId) {
+      const mode = await getChatMode(appId, chatId, { forceRefresh: true });
+      if (mode === 'topic') {
+        logger.warn(`[routing] Chat-scope session ${ds.session.sessionId.substring(0, 8)} is now topic-mode; replying in original thread ${ds.session.rootMessageId.substring(0, 12)}`);
+        return replyMessage(appId, ds.session.rootMessageId, content, msgType, true);
+      }
+    }
+    return sendMessage(appId, chatId, content, msgType);
   }
 
   // Thread-scope (or unknown / legacy): reply in thread.
@@ -1143,6 +1156,19 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       handleNewTopic: (data, ctx) => handleNewTopic(data, ctx),
       handleThreadReply: (data, ctx) => handleThreadReply(data, ctx),
       isSessionOwner: (anchor, appId) => activeSessions.has(sessionKey(anchor, appId)),
+      // Chat was converted 普通群 → 话题群 while we held a chat-scope session.
+      // Evict it from the routing map so subsequent inbound messages can land
+      // on a fresh thread-scope session (dispatcher already rerouted this turn
+      // to handleNewTopic). The worker is left running on purpose: the user may
+      // still have its web terminal open, and `/close` is the canonical cleanup
+      // path. Scheduler tasks tied to this session keep their `scope='chat'`
+      // semantics — that's an edge case worth following up on, not blocking
+      // the main fix.
+      onChatModeConverted: (chatId, appId) => {
+        const key = sessionKey(chatId, appId);
+        const evicted = activeSessions.delete(key);
+        logger.info(`[chat-mode-converted] ${chatId.substring(0, 12)} evicted=${evicted}; worker (if any) keeps running until /close`);
+      },
     });
   }
 

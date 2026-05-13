@@ -339,6 +339,14 @@ export interface EventHandlers {
   /** Check if this bot owns an active session anchored at the given id
    *  (rootMessageId for thread-scope, chatId for chat-scope). */
   isSessionOwner?: (anchor: string, larkAppId: string) => boolean;
+  /** Fired when the dispatcher detects that a chat with a live chat-scope
+   *  session has been converted to topic mode (chat_mode 'group' → 'topic'
+   *  via Lark group settings). Daemon should evict the stale chat-scope
+   *  session from its activeSessions map so future routing doesn't hit it
+   *  and so scheduler/dashboard sends stop going through sendMessage(chatId)
+   *  — which in a 话题群 wraps each top-level message in a fresh topic.
+   *  Best-effort fire-and-forget; the dispatcher proceeds either way. */
+  onChatModeConverted?: (chatId: string, larkAppId: string) => void;
 }
 
 /**
@@ -566,6 +574,36 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
 
         const routing = await decideRouting(larkAppId, message);
 
+        // 话题群 → 普通群 (reverse conversion). Symmetric to the forward check
+        // below: when decideRouting lands on thread-scope purely because the
+        // *cached* chat_mode said 'topic' (no real thread_id on the message
+        // either — i.e. this would seed a brand-new thread), our 5-min cache
+        // may be stale from before a flip-back to 普通群. Re-verify with
+        // forceRefresh; if Lark now reports 'group', flatten to chat-scope so
+        // the bot doesn't keep wrapping every top-level reply in a fresh
+        // Lark topic via reply_in_thread.
+        //
+        // Skip when there's a real thread_id (authoritative thread signal,
+        // can't be cache-stale) or when chatType is p2p (DMs always thread).
+        // Runs BEFORE /t override so a `@bot /t …` in a now-flat 普通群 still
+        // gets the explicit topic seed it asked for.
+        if (
+          routing.scope === 'thread' &&
+          routing.anchor === messageId &&
+          !message.thread_id &&
+          chatType === 'group'
+        ) {
+          const freshMode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
+          if (freshMode === 'group') {
+            logger.info(
+              `[chat-mode-converted] ${chatId.substring(0, 12)} chat_mode flipped 'topic' → 'group'; ` +
+              `rerouting msg=${messageId.substring(0, 12)} as chat-scope`,
+            );
+            routing.scope = 'chat';
+            routing.anchor = chatId;
+          }
+        }
+
         // /t / /topic in 普通群: flip routing to thread-scope so the bot's
         // first reply seeds a fresh Lark thread, even if a chat-scope session
         // is currently active in this chat.
@@ -573,7 +611,35 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           logger.info(`[/t] Force-topic override: msg=${messageId.substring(0, 12)} → thread-scope, anchor=msg`);
         }
 
-        const ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
+        let ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
+
+        // 普通群 → 话题群 conversion detection. Lark group admins can flip
+        // chat_mode at any time; our 30/5-min cache lags. If routing landed on
+        // chat-scope AND we own a session at this chat, the chat-scope session
+        // may be stale from before a conversion. Re-fetch chat_mode with
+        // forceRefresh to confirm. If it's now 'topic', the session is dead:
+        // sendMessage(chatId) at dispatch time would wrap each reply in a new
+        // Lark topic (the user-reported bug). Evict the stale session, then
+        // route this message as if it were a brand-new thread seed so
+        // handleNewTopic spawns a thread-scope session anchored at messageId.
+        // Gate on ownsSession to avoid an API roundtrip on every fresh inbound.
+        if (routing.scope === 'chat' && ownsSession) {
+          const freshMode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
+          if (freshMode === 'topic') {
+            logger.info(
+              `[chat-mode-converted] ${chatId.substring(0, 12)} chat_mode flipped 'group' → 'topic'; ` +
+              `evicting stale chat-scope session and rerouting msg=${messageId.substring(0, 12)} as thread seed`,
+            );
+            try { handlers.onChatModeConverted?.(chatId, larkAppId); } catch (err) {
+              logger.warn(`onChatModeConverted handler threw: ${err}`);
+            }
+            routing.scope = 'thread';
+            routing.anchor = messageId;
+            // ownsSession was true on the stale chatId anchor; the new anchor
+            // (messageId) is brand-new, so no current session owns it.
+            ownsSession = false;
+          }
+        }
 
         // Permission gating — same shape as before, just keyed on
         // `ownsSession` (anchor-aware) instead of "rootId presence":

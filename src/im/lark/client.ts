@@ -165,21 +165,27 @@ export async function getChatInfo(larkAppId: string, chatId: string): Promise<{ 
 }
 
 /** Lark chat-mode classification used by botmux to decide session scope:
- *   - 'topic'  → 话题群 (chat_mode='topic'): every top-level message becomes a
- *                new thread, so botmux always uses thread-scope sessions
- *   - 'group'  → 普通群 (chat_mode='group'): top-level messages stay top-level,
- *                so botmux uses chat-scope by default; user-initiated threads
- *                still get their own thread-scope sessions
+ *   - 'topic'  → 话题群: every top-level message becomes a new thread, so
+ *                botmux always uses thread-scope sessions. Two underlying
+ *                Lark shapes collapse into this:
+ *                  * chat_mode='topic' (rare; creation-time classification)
+ *                  * group_message_type='thread' (the toggle Lark clients
+ *                    expose as "话题/聊天" — flips on the fly, chat_mode stays
+ *                    'group'). This is the common case for user-converted
+ *                    话题群.
+ *   - 'group'  → 普通群: top-level messages stay top-level, so botmux uses
+ *                chat-scope by default; user-initiated threads still get
+ *                their own thread-scope sessions
  *   - 'p2p'    → direct message: equivalent to 普通群 from a routing
  *                perspective (chat-scope by default) */
 export type ChatMode = 'group' | 'topic' | 'p2p';
 
 const chatModeCache = new Map<string, { mode: ChatMode; cachedAt: number }>();
-const CHAT_MODE_TTL_MS = 30 * 60 * 1000; // 30 min — chat_mode rarely changes
+const CHAT_MODE_TTL_MS = 5 * 60 * 1000; // 5 min — chat_mode can change when a group is converted to topic mode
 
 /** Resolve the conversational topology of a chat (话题群 vs 普通群 vs p2p).
  *
- *  Cached per (appId, chatId) for 30 minutes. Errors fall back to 'group' so a
+ *  Cached per (appId, chatId) for 5 minutes. Errors fall back to 'group' so a
  *  flaky Lark API doesn't break message routing — chat-scope is the safer
  *  default than incorrectly forcing a thread, since users can always reply
  *  in-thread to escape it.
@@ -187,10 +193,14 @@ const CHAT_MODE_TTL_MS = 30 * 60 * 1000; // 30 min — chat_mode rarely changes
  *  Calling this with a chat that's already known to be p2p (from
  *  message.chat_type === 'p2p') is fine but wasteful — prefer skipping the
  *  call in that case. */
-export async function getChatMode(larkAppId: string, chatId: string): Promise<ChatMode> {
+export async function getChatMode(
+  larkAppId: string,
+  chatId: string,
+  options: { forceRefresh?: boolean } = {},
+): Promise<ChatMode> {
   const cacheKey = `${larkAppId}::${chatId}`;
   const cached = chatModeCache.get(cacheKey);
-  if (cached && Date.now() - cached.cachedAt < CHAT_MODE_TTL_MS) {
+  if (!options.forceRefresh && cached && Date.now() - cached.cachedAt < CHAT_MODE_TTL_MS) {
     return cached.mode;
   }
 
@@ -203,10 +213,20 @@ export async function getChatMode(larkAppId: string, chatId: string): Promise<Ch
     if (res.code === 0) {
       const rawMode = String(res.data?.chat_mode ?? '').toLowerCase();
       const rawType = String(res.data?.chat_type ?? '').toLowerCase();
-      // Lark returns chat_mode='topic' for 话题群; chat_mode='group' for 普通群.
-      // p2p chats answer with chat_type='p2p' regardless of chat_mode.
+      // group_message_type is the actual "is this a 话题群" signal. The
+      // Lark client UI lets users flip a chat between flat mode and topic
+      // mode at any time — that toggle writes group_message_type
+      // ('chat' ↔ 'thread'), NOT chat_mode. chat_mode is the chat's
+      // creation-time topology classification and stays 'group' even for
+      // user-converted topic chats; in our tenant we have only ever seen
+      // chat_mode='topic' on a small set of legacy/specially-created chats.
+      // Treating chat_mode='topic' OR group_message_type='thread' as 'topic'
+      // covers both shapes, and matches the behaviour the Lark client
+      // displays: every top-level message wraps into a fresh thread, so a
+      // bot's sendMessage(chatId) creates a new visible topic each turn.
+      const rawGmt = String(res.data?.group_message_type ?? '').toLowerCase();
       if (rawType === 'p2p') mode = 'p2p';
-      else if (rawMode === 'topic') mode = 'topic';
+      else if (rawMode === 'topic' || rawGmt === 'thread') mode = 'topic';
       else mode = 'group';
     } else {
       logger.warn(`getChatMode(${chatId}) failed: ${res.msg} (code: ${res.code}); falling back to 'group'`);
