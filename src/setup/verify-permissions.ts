@@ -101,7 +101,10 @@ export async function validateCredentials(
     else opts.signal.addEventListener('abort', () => ac.abort(), { once: true });
   }
 
+  // Codex review v2 follow-up: timer 必须覆盖 res.json() 阶段, 否则飞书极端半挂
+  // (body 半 chunk 后服务端不再发) 仍会卡住. clearTimeout 推迟到 JSON 解析之后.
   let res: Response;
+  let body: any;
   try {
     res = await fetch(url, {
       method: 'POST',
@@ -111,10 +114,15 @@ export async function validateCredentials(
       body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
       signal: ac.signal,
     });
+    body = await res.json();
   } catch (err: any) {
     clearTimeout(timer);
-    // AbortError (fetch 内部 / 我们自己 timeout) 全部归到 network
+    // AbortError (fetch / json() 内部 / 我们自己 timeout) 全部归到 network
     const isAbort = err?.name === 'AbortError' || ac.signal.aborted;
+    // JSON 解析错 (非 abort) 归 unknown, 保留旧行为
+    if (!isAbort && err instanceof SyntaxError) {
+      return { ok: false, error: 'unknown', message: `HTTP ${res!?.status ?? '?'} 响应非 JSON` };
+    }
     return {
       ok: false,
       error: 'network',
@@ -124,13 +132,6 @@ export async function validateCredentials(
     };
   }
   clearTimeout(timer);
-
-  let body: any;
-  try {
-    body = await res.json();
-  } catch {
-    return { ok: false, error: 'unknown', message: `HTTP ${res.status} 响应非 JSON` };
-  }
 
   if (body?.code === 0 && typeof body.tenant_access_token === 'string') {
     return { ok: true, tenantAccessToken: body.tenant_access_token, tokenExpiresIn: body.expire ?? 7200 };
