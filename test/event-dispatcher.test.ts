@@ -1355,6 +1355,38 @@ describe('im.message.receive_v1 — /introduce command', () => {
 
     expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
   });
+
+  it('triggers on rich-text (post) form: tag:"at" + text " /introduce"', async () => {
+    // 锁住飞书富文本 post 形态: @ 节点不进 routing text (extractor 只拼 text 节点),
+    // 但 message.mentions[] 仍带全量 (open_id, name)。/introduce 必须仍触发。
+    // 后续如果有人改 extractMessageTextForRouting 把 at 节点也拼进文本,
+    // 或者破坏 post → text 提取逻辑,这个测试会先炸。
+    const postContent = JSON.stringify({
+      zh_cn: {
+        content: [[
+          { tag: 'at', user_id: MY_OPEN_ID, user_name: 'BotA' },
+          { tag: 'at', user_id: OTHER_BOT_OPEN_ID, user_name: 'BotB' },
+          { tag: 'text', text: ' /introduce' },
+        ]],
+      },
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: postContent,
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+        { key: '@_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+      ],
+      chatType: 'group',
+      messageId: 'msg-post-introduce',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
 });
 
 describe('writeBotInfoFile — multi-daemon merge', () => {
