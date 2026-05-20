@@ -108,10 +108,12 @@ export function createCocoAdapter(pathOverride?: string): CliAdapter {
       //   2. The old adapter had no verification, so the worker never knew
       //      and the user stared at Lark waiting for a reply that never came.
       //
-      // Fix: use tmux `load-buffer` + `paste-buffer -d` (the `pasteText` path)
-      // which automatically wraps the content in bracketed-paste markers
-      // (`\e[200~...\e[201~`) when the Ink TUI has bracketed paste enabled —
-      // Ink does by default on fresh spawn. CoCo sees an explicit START/END
+      // Fix: use tmux `load-buffer` + `paste-buffer -d -p` (the `pasteText`
+      // path). The `-p` flag is what makes tmux wrap the content in
+      // bracketed-paste markers (`\e[200~...\e[201~`) when the Ink TUI has
+      // bracketed paste enabled — Ink does by default on fresh spawn. WITHOUT
+      // `-p` tmux pastes raw bytes (no markers) and we're back to the burst
+      // bug below. CoCo sees an explicit START/END
       // pair, so embedded `\n` stay as content (no per-line submits) and the
       // trailing Enter after submitDelay is unambiguously a submit (not part
       // of an "ongoing paste burst" the way send-keys -l rapid input was).
@@ -152,10 +154,12 @@ export function createCocoAdapter(pathOverride?: string): CliAdapter {
 
       try {
         if (pty.pasteText) {
-          // tmux mode: load-buffer + paste-buffer -d. Tmux wraps in bracketed
-          // paste automatically when the pane has it on (Ink default). The
-          // trailing `-d` deletes the buffer after pasting so it doesn't
-          // accumulate across writes.
+          // tmux mode: load-buffer + paste-buffer -d -p. The `-p` flag (added
+          // in TmuxPipeBackend.pasteText — the real runtime backend) makes tmux
+          // emit bracketed-paste markers when the pane has them on (Ink
+          // default); without it the trailing Enter is swallowed as a soft
+          // newline and the message strands. `-d` deletes the buffer after
+          // pasting so it doesn't accumulate across writes.
           pty.pasteText(content);
         } else {
           // Non-tmux fallback (raw PTY): wrap markers ourselves.
