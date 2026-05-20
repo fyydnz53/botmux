@@ -24,6 +24,8 @@ describe('built-in botmux-history skill', () => {
     // Description must mention 普通群 so普通群 bots actually trigger the skill.
     expect(history!.content).toContain('普通群');
     expect(history!.content).toContain('scope=chat');
+    expect(history!.content).toContain('--scope ambient');
+    expect(history!.content).toContain('thread 外的群聊上下文');
   });
 
   it('retires the old botmux-thread-messages name', () => {

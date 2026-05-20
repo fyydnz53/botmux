@@ -21,6 +21,27 @@ function makeMsg(msgType: string, content: object | string) {
   };
 }
 
+// ─── API message metadata ─────────────────────────────────────────────────
+
+describe('parseApiMessage metadata', () => {
+  it('preserves root_id when present', () => {
+    const result = parseApiMessage({
+      ...makeMsg('text', { text: 'reply' }),
+      root_id: 'om_root',
+      thread_id: 'omt_thread',
+    });
+    expect(result.rootId).toBe('om_root');
+  });
+
+  it('falls back to thread_id for rootId when root_id is absent', () => {
+    const result = parseApiMessage({
+      ...makeMsg('text', { text: 'topic root' }),
+      thread_id: 'omt_thread',
+    });
+    expect(result.rootId).toBe('omt_thread');
+  });
+});
+
 // ─── Interactive card: Format A (Lark API simplified) ─────────────────────
 
 describe('Interactive card parsing: Format A (API simplified)', () => {

@@ -545,6 +545,61 @@ export async function listChatMessages(
   return allMessages.slice(0, pageSize).reverse();
 }
 
+export interface AmbientChatMessageOptions {
+  /**
+   * Exclude messages at/after this timestamp (Lark create_time, milliseconds as
+   * a string). Used by `/t` thread sessions to fetch the chat tail that existed
+   * before the thread was opened, avoiding bot cards/replies from the new
+   * thread polluting the context.
+   */
+  beforeCreateTime?: string;
+  /** Exclude the current thread root and its replies from the chat tail. */
+  excludeRootMessageId?: string;
+  /** How many chat-container messages to scan before filtering. */
+  scanLimit?: number;
+}
+
+export function filterAmbientChatMessages(
+  messages: any[],
+  pageSize: number,
+  options: Pick<AmbientChatMessageOptions, 'beforeCreateTime' | 'excludeRootMessageId'> = {},
+): any[] {
+  const beforeMs = options.beforeCreateTime ? Number(options.beforeCreateTime) : undefined;
+  const root = options.excludeRootMessageId;
+
+  const filtered = messages.filter((m: any) => {
+    if (root && (m.message_id === root || m.root_id === root)) return false;
+    if (Number.isFinite(beforeMs)) {
+      const createdMs = Number(m.create_time);
+      // If create_time is malformed, keep the message rather than silently
+      // dropping potentially useful context. Lark normally returns epoch ms.
+      if (Number.isFinite(createdMs) && createdMs >= (beforeMs as number)) return false;
+    }
+    return true;
+  });
+
+  return filtered.slice(Math.max(0, filtered.length - pageSize));
+}
+
+/**
+ * List recent chat-container messages as ambient context for a thread session.
+ *
+ * This intentionally differs from `listChatMessages`: callers want the newest
+ * `pageSize` messages AFTER filtering out the current thread and (optionally)
+ * messages created after the thread root. We therefore may scan more than
+ * `pageSize` items and cap only after filtering.
+ */
+export async function listAmbientChatMessages(
+  larkAppId: string,
+  chatId: string,
+  pageSize: number = 50,
+  options: AmbientChatMessageOptions = {},
+): Promise<any[]> {
+  const scanLimit = Math.max(pageSize, options.scanLimit ?? Math.min(Math.max(pageSize * 4, 50), 200));
+  const raw = await listChatMessages(larkAppId, chatId, scanLimit);
+  return filterAmbientChatMessages(raw, pageSize, options);
+}
+
 /** Fallback: scan chat messages and filter by root_id. */
 async function listByChatFilter(c: any, chatId: string, rootMessageId: string, pageSize: number): Promise<any[]> {
   const allMessages: any[] = [];

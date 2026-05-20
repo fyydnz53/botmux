@@ -2044,7 +2044,9 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --top-level                     发顶层消息（不回复进当前话题）
        --chat-id <oc_xxx>              指定目标群（默认当前话题所在群）
   bots list                            列出当前群聊中的机器人（含 open_id）
-  history [--limit N]                  拉取当前会话的消息历史 (JSON)，话题群 → 话题内，普通群 → 整群
+  history [--limit N] [--scope session|thread|chat|ambient]
+                                       拉取当前会话的消息历史 (JSON)。默认按 session scope：话题/话题群 → 话题内，普通群 → 整群；
+                                       thread 会话里可用 --scope ambient 读取 thread 外的群聊上下文
   quoted <message_id>                  拉取被引用的单条消息 (JSON)，message_id 取自 daemon 注入的引用提示行
 
 新建飞书群:
@@ -2311,35 +2313,61 @@ async function resolveSessionAppId(sessionIdArg: string | undefined): Promise<{ 
 
 async function cmdHistory(rest: string[]): Promise<void> {
   const limit = parseInt(argValue(rest, '--limit') ?? '50', 10);
+  const scopeArg = argValue(rest, '--scope') ?? 'session';
   const sessionIdArg = argValue(rest, '--session-id');
   const { sid, larkAppId: appId, session: s } = await resolveSessionAppId(sessionIdArg);
 
-  const { listThreadMessages, listChatMessages } = await import('./im/lark/client.js');
-  const { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent } = await import('./im/lark/message-parser.js');
+  const validScopes = new Set(['session', 'thread', 'chat', 'ambient']);
+  if (!validScopes.has(scopeArg)) {
+    console.error(`无效 --scope: ${scopeArg}。可用: session | thread | chat | ambient`);
+    process.exit(1);
+  }
+
+  const { getMessageDetail, listAmbientChatMessages, listThreadMessages, listChatMessages } = await import('./im/lark/client.js');
+  const { parseApiMessage } = await import('./im/lark/message-parser.js');
   const { expandMergeForward } = await import('./im/lark/merge-forward.js');
   try {
     // Chat-scope sessions (普通群整群一会话) have no thread to walk — list the
     // chat container directly and let the caller cap with --limit. Thread-scope
-    // sessions walk the thread container by root_id.
+    // sessions walk the thread container by root_id. `--scope chat|ambient`
+    // lets a thread-scope session intentionally read outside its thread when
+    // it needs the surrounding group conversation (for example `/t` spawned
+    // from an ongoing 普通群 discussion).
     const isChatScope = s.scope === 'chat';
-    const raw = isChatScope
+    const effectiveScope = scopeArg === 'session'
+      ? (isChatScope ? 'chat' : 'thread')
+      : scopeArg;
+
+    if (effectiveScope === 'thread' && isChatScope) {
+      console.error('当前 session 是 chat-scope，没有 thread 历史可读取。请使用 --scope chat。');
+      process.exit(1);
+    }
+
+    let ambientBeforeCreateTime: string | undefined;
+    if (effectiveScope === 'ambient') {
+      try {
+        const detail = await getMessageDetail(appId, s.rootMessageId, { userCardContent: false });
+        ambientBeforeCreateTime = detail?.items?.[0]?.create_time;
+      } catch {
+        // Best-effort only: ambient history should still work if the root
+        // message was withdrawn or is otherwise unavailable; it will then fall
+        // back to the chat tail with current-thread messages filtered out.
+      }
+    }
+
+    const raw = effectiveScope === 'chat'
       ? await listChatMessages(appId, s.chatId, limit)
-      : await listThreadMessages(appId, s.chatId, s.rootMessageId, limit);
+      : effectiveScope === 'ambient'
+        ? await listAmbientChatMessages(appId, s.chatId, limit, {
+            beforeCreateTime: ambientBeforeCreateTime,
+            excludeRootMessageId: s.rootMessageId,
+          })
+        : await listThreadMessages(appId, s.chatId, s.rootMessageId, limit);
     // Expand merge_forward to <forwarded_messages> XML, mirroring the live event
     // path in daemon.ts. Each merge_forward gets its own numberer (we don't
     // download resources here — only [图片 N] placeholders matter).
     const messages = await Promise.all(raw.map(async (m: any) => {
-      let parsed = parseApiMessage(m);
-      // `im.v1.message.list` returns Lark's simplified "请升级客户端" fallback for
-      // complex cards — the whole body (user-forwarded) or nested sub-cards
-      // buried mid-body (Argos alarms). Those are the cards where the list view
-      // alone is incomplete, so resolve them by unioning both `im.message.get`
-      // representations (server-rendered + full structured). Failures keep the
-      // list text. Simple cards (no fallback) already render fully here.
-      if (parsed.msgType === 'interactive' && cardContentHasUpgradeFallback(parsed.content)) {
-        const merged = await resolveMergedCardContent(appId, parsed.messageId).catch(() => null);
-        if (merged) parsed.content = merged.text;
-      }
+      const parsed = parseApiMessage(m);
       if (parsed.msgType === 'merge_forward') {
         await expandMergeForward(appId, parsed.messageId, parsed);
       }
@@ -2348,8 +2376,16 @@ async function cmdHistory(rest: string[]): Promise<void> {
     console.log(JSON.stringify({
       sessionId: sid,
       chatId: s.chatId,
-      scope: isChatScope ? 'chat' : 'thread',
+      scope: effectiveScope,
+      sessionScope: isChatScope ? 'chat' : 'thread',
       ...(isChatScope ? {} : { rootMessageId: s.rootMessageId }),
+      ...(effectiveScope === 'ambient' ? {
+        ambient: {
+          source: 'chat',
+          beforeCreateTime: ambientBeforeCreateTime,
+          excludeRootMessageId: s.rootMessageId,
+        },
+      } : {}),
       messages,
       total: messages.length,
     }, null, 2));
@@ -2378,7 +2414,6 @@ async function cmdQuoted(rest: string[]): Promise<void> {
   const { getMessageDetail } = await import('./im/lark/client.js');
   const { expandMergeForward } = await import('./im/lark/merge-forward.js');
   const { renderQuotedMessage } = await import('./cli/quoted-render.js');
-  const { resolveMergedCardContent } = await import('./im/lark/message-parser.js');
   try {
     const detail = await getMessageDetail(appId, messageId);
     const msg = detail?.items?.[0];
@@ -2387,15 +2422,6 @@ async function cmdQuoted(rest: string[]): Promise<void> {
       process.exit(1);
     }
     const rendered = await renderQuotedMessage(appId, msg, expandMergeForward);
-    // Interactive cards: union both im.message.get representations so the quoted
-    // view matches history/live (recovers names + sub-card content + options).
-    // This single-message path always merges — unlike history (which starts
-    // from the hole-bearing list view), the quoted base is the hole-free B view
-    // so there's no cheap local signal that a merge would add anything.
-    if (rendered.msgType === 'interactive') {
-      const merged = await resolveMergedCardContent(appId, messageId).catch(() => null);
-      if (merged) rendered.content = merged.text;
-    }
     console.log(JSON.stringify(rendered, null, 2));
   } catch (err: any) {
     console.error(`获取被引用消息失败: ${err.message}`);
