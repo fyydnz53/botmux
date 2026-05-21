@@ -32,7 +32,7 @@ import { cocoEventsPathForSession, drainCocoEvents, findCocoSessionByPid } from 
 import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
-import type { DaemonToWorker, WorkerToDaemon, DisplayMode, TermActionKey } from './types.js';
+import type { DaemonToWorker, WorkerToDaemon, DisplayMode, TermActionKey, ScreenStatus } from './types.js';
 import { TerminalRenderer } from './utils/terminal-renderer.js';
 import {
   DEFAULT_RENDER_COLS,
@@ -92,7 +92,7 @@ let isPromptReady = false;
 let isFlushing = false;
 const pendingMessages: string[] = [];
 
-type RuntimeScreenStatus = 'working' | 'idle' | 'analyzing';
+type RuntimeScreenStatus = Exclude<ScreenStatus, 'limited'>;
 
 let usageLimitTurnSeq = 0;
 let usageLimitDetectedTurnSeq: number | undefined;

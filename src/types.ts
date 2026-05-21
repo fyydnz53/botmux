@@ -1,5 +1,10 @@
 import type { CliUsageLimitState } from './utils/cli-usage-limit.js';
 
+/** Runtime status the worker derives from screen content. */
+export type ScreenStatus = 'working' | 'idle' | 'analyzing' | 'limited';
+/** Status shown on a streaming card — adds the pre-spawn 'starting' phase. */
+export type StreamStatus = ScreenStatus | 'starting';
+
 export interface Session {
   sessionId: string;
   chatId: string;
@@ -173,11 +178,11 @@ export type WorkerToDaemon =
   | { type: 'ready'; port: number; token: string }
   | { type: 'claude_exit'; code: number | null; signal: string | null }
   | { type: 'prompt_ready' }
-  | { type: 'screen_update'; content: string; status: 'working' | 'idle' | 'analyzing' | 'limited'; usageLimit?: CliUsageLimitState }
+  | { type: 'screen_update'; content: string; status: ScreenStatus; usageLimit?: CliUsageLimitState }
   | { type: 'error'; message: string }
   | { type: 'tui_prompt'; description: string; options: Array<{ label?: string; text: string; selected: boolean; type?: string; keys?: string[] }>; multiSelect?: boolean }
   | { type: 'tui_prompt_resolved'; selectedText?: string }
-  | { type: 'screenshot_uploaded'; imageKey: string; status: 'working' | 'idle' | 'analyzing' | 'limited'; usageLimit?: CliUsageLimitState }
+  | { type: 'screenshot_uploaded'; imageKey: string; status: ScreenStatus; usageLimit?: CliUsageLimitState }
   | { type: 'user_notify'; message: string }
   | {
       type: 'final_output';

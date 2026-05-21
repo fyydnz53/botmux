@@ -1,7 +1,7 @@
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import type { CliId } from '../../adapters/cli/types.js';
 import type { AdoptableSession } from '../../core/session-discovery.js';
-import type { DisplayMode } from '../../types.js';
+import type { DisplayMode, StreamStatus } from '../../types.js';
 import type { CliUsageLimitState } from '../../utils/cli-usage-limit.js';
 import { t, type Locale } from '../../i18n/index.js';
 
@@ -199,7 +199,7 @@ export function buildStreamingCard(
   terminalUrl: string,
   title: string,
   screenContent: string,
-  status: 'starting' | 'working' | 'idle' | 'analyzing' | 'limited',
+  status: StreamStatus,
   cliId?: CliId,
   displayMode: DisplayMode = 'hidden',
   cardNonce?: string,
