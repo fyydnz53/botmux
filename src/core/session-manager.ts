@@ -27,6 +27,7 @@ import { markSessionActivity } from './session-activity.js';
 import { usageLimitStateKey } from '../utils/cli-usage-limit.js';
 import { t, localeForBot, type Locale } from '../i18n/index.js';
 import { parseWorkingDirList } from '../utils/working-dir.js';
+import { resolveRoleFile } from './role-resolver.js';
 
 function sessionCreatedAtMs(session: { createdAt?: string }): number {
   return session.createdAt ? (Date.parse(session.createdAt) || Date.now()) : Date.now();
@@ -205,6 +206,7 @@ export function buildNewTopicPrompt(
   botIdentity?: { name?: string; openId?: string },
   locale?: Locale,
   sender?: ResolvedSender,
+  opts?: { workingDir?: string; chatId?: string },
 ): string {
   const adapter = createCliAdapterSync(cliId, cliPathOverride);
   // Non-Claude CLIs receive the botmux routing hints inline via the prompt
@@ -227,6 +229,14 @@ export function buildNewTopicPrompt(
       `  <routing_rules>${t('ai.identity.short_routing', undefined, locale)}</routing_rules>`,
       '</identity>',
     ].join('\n');
+  }
+
+  let roleBlock = '';
+  if (opts?.workingDir && opts?.chatId) {
+    const roleContent = resolveRoleFile(opts.workingDir, opts.chatId);
+    if (roleContent) {
+      roleBlock = `<role context="group" chat_id="${xmlEscape(opts.chatId)}">\n${roleContent}\n</role>`;
+    }
   }
 
   let mentionBlock = '';
@@ -272,6 +282,7 @@ export function buildNewTopicPrompt(
     if (routingBlock) parts.push(routingBlock);
     if (identityBlock) parts.push(identityBlock);
   }
+  if (roleBlock) parts.push(roleBlock);
   if (mentionBlock) parts.push(mentionBlock);
   if (botBlock) parts.push(botBlock);
 
@@ -286,7 +297,7 @@ export function buildNewTopicPrompt(
 export function buildFollowUpContent(
   content: string,
   sessionId: string,
-  opts?: { attachments?: LarkAttachment[]; mentions?: LarkMention[]; isAdoptMode?: boolean; cliId?: CliId; cliPathOverride?: string; locale?: Locale; sender?: ResolvedSender },
+  opts?: { attachments?: LarkAttachment[]; mentions?: LarkMention[]; isAdoptMode?: boolean; cliId?: CliId; cliPathOverride?: string; locale?: Locale; sender?: ResolvedSender; workingDir?: string; chatId?: string },
 ): string {
   const parts: string[] = [`<user_message>\n${content}\n</user_message>`];
 
@@ -297,6 +308,14 @@ export function buildFollowUpContent(
     ? formatAttachmentsHint(opts.attachments, opts.locale)
     : '';
   if (attachHint) parts.push(attachHint);
+
+  // Inject per-chat role for follow-up messages (same as buildNewTopicPrompt)
+  if (opts?.workingDir && opts?.chatId) {
+    const roleContent = resolveRoleFile(opts.workingDir, opts.chatId);
+    if (roleContent) {
+      parts.push(`<role context="group" chat_id="${xmlEscape(opts.chatId)}">\n${roleContent}\n</role>`);
+    }
+  }
 
   if (!opts?.isAdoptMode) {
     const skipSessionId = opts?.cliId
@@ -451,6 +470,8 @@ export function buildReforkPrompt(
     cliPathOverride: opts?.cliPathOverride,
     locale,
     sender: opts?.sender,
+    workingDir: ds.workingDir,
+    chatId: ds.session.chatId,
   });
 }
 
@@ -891,7 +912,7 @@ export async function executeScheduledTask(
   sessionStore.updateSession(session);
   messageQueue.ensureQueue(anchor);
 
-  const prompt = buildNewTopicPrompt(task.prompt, session.sessionId, bot.config.cliId, bot.config.cliPathOverride, undefined, undefined, undefined, undefined, { name: bot.botName, openId: bot.botOpenId }, localeForBot(larkAppId));
+  const prompt = buildNewTopicPrompt(task.prompt, session.sessionId, bot.config.cliId, bot.config.cliPathOverride, undefined, undefined, undefined, undefined, { name: bot.botName, openId: bot.botOpenId }, localeForBot(larkAppId), undefined, { workingDir: bot.config.workingDir, chatId: task.chatId });
 
   const ds: DaemonSession = {
     session,

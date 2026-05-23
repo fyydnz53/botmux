@@ -15,6 +15,8 @@ import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { locateLimiter } from './dashboard-locate.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { validateWorkingDir } from './working-dir.js';
+import { getBot } from '../bot-registry.js';
+import { resolveRoleFile, writeRoleFile, deleteRoleFile } from './role-resolver.js';
 import {
   composeRowFromActive,
   composeRowFromClosed,
@@ -292,7 +294,8 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
     // matrix can show toggle state without a second round-trip.
     const enriched = chats.map(c => {
       const oncall = oncallStore.getOncallStatus(cachedLarkAppId, c.chatId);
-      return { ...c, oncallChat: oncall ?? null, firstSeenAt: seenMap.get(c.chatId) ?? null };
+      const hasRole = resolveRoleFile(getBot(cachedLarkAppId)?.config?.workingDir ?? '', c.chatId) !== null;
+      return { ...c, oncallChat: oncall ?? null, firstSeenAt: seenMap.get(c.chatId) ?? null, hasRole };
     });
     jsonRes(res, 200, { chats: enriched });
   } catch (e) {
@@ -377,6 +380,52 @@ ipcRoute('DELETE', '/api/oncall/:chatId', async (_req, res, p) => {
   const r = await oncallStore.unbindOncall(cachedLarkAppId, p.chatId);
   if (!r.ok) return jsonRes(res, 400, r);
   jsonRes(res, 200, { ok: true, wasBound: r.wasBound });
+});
+
+// ─── Role management (dashboard) ───────────────────────────────────────────
+// GET    /api/roles/:chatId  → { chatId, content, byteLength }
+// PUT    /api/roles/:chatId  body: {content} → write role file
+// DELETE /api/roles/:chatId  → remove role file
+
+ipcRoute('GET', '/api/roles/:chatId', async (_req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  const bot = getBot(cachedLarkAppId);
+  const workingDir = bot?.config?.workingDir;
+  if (!workingDir) return jsonRes(res, 400, { error: 'no_working_dir' });
+  const content = resolveRoleFile(workingDir, p.chatId);
+  jsonRes(res, 200, {
+    chatId: p.chatId,
+    content,
+    byteLength: content ? Buffer.byteLength(content, 'utf-8') : 0,
+    hasRole: content !== null,
+  });
+});
+
+ipcRoute('PUT', '/api/roles/:chatId', async (req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  const bot = getBot(cachedLarkAppId);
+  const workingDir = bot?.config?.workingDir;
+  if (!workingDir) return jsonRes(res, 400, { error: 'no_working_dir' });
+  let body: { content?: unknown };
+  try { body = await readJsonBody<{ content?: string }>(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const content = typeof body.content === 'string' ? body.content.trim() : '';
+  if (!content) return jsonRes(res, 400, { ok: false, error: 'content_required' });
+  try {
+    writeRoleFile(workingDir, p.chatId, content);
+    jsonRes(res, 200, { ok: true });
+  } catch (e) {
+    jsonRes(res, 500, { ok: false, error: String(e) });
+  }
+});
+
+ipcRoute('DELETE', '/api/roles/:chatId', async (_req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  const bot = getBot(cachedLarkAppId);
+  const workingDir = bot?.config?.workingDir;
+  if (!workingDir) return jsonRes(res, 400, { error: 'no_working_dir' });
+  const existed = deleteRoleFile(workingDir, p.chatId);
+  jsonRes(res, 200, { ok: true, existed });
 });
 
 // ─── Per-bot defaultOncall (dashboard) ─────────────────────────────────────

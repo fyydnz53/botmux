@@ -238,6 +238,18 @@ export const messages: Record<string, string> = {
   'ai.bridge.mentions_label': '[@提及]',
   'schedule.title_prefix': '[定时]',
 
+  // ─── Role command ─────────────────────────────────────────────────────────
+  'role.current': '📋 当前群的 Role 配置：',
+  'role.byte_count': '{bytes} / {max} 字节',
+  'role.empty': '当前群尚未配置 Role。\n\n用法：\n/role set <Markdown 内容> — 设置角色\n/role — 查看当前角色\n/role delete — 删除角色',
+  'role.saved_via_cmd': '✅ Role 已更新（{bytes} / {max} 字节）。下次消息生效。',
+  'role.deleted_via_cmd': '✅ Role 已删除。',
+  'role.nothing_to_delete': '当前群没有 Role 配置，无需删除。',
+  'role.set_empty': 'Role 内容不能为空。用法：/role set <Markdown 内容>',
+  'role.no_chat': '无法获取群信息，请稍后重试。',
+  'role.no_working_dir': '无法获取工作目录，请检查 bot 配置。',
+  'role.help': '/role 用法：\n• /role — 查看当前角色\n• /role set <Markdown 内容> — 设置角色\n• /role delete — 删除角色',
+
   // ─── Card handler responses ──────────────────────────────────────────────
   'card.action.adopt_no_restart': '⚠️ adopt 模式不支持重启（不会触动你自己的 tmux pane / CLI 进程）',
   'card.action.restarted': '🔄 已重启 {cliName}',

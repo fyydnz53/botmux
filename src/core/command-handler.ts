@@ -21,6 +21,7 @@ import { discoverAdoptableSessions, validateAdoptTarget, type AdoptableSession }
 import { generateAuthUrl, getTokenStatus } from '../utils/user-token.js';
 import { bindOncall, unbindOncall, getOncallStatus } from '../services/oncall-store.js';
 import { invalidWorkingDirs } from '../utils/working-dir.js';
+import { resolveRoleFile, writeRoleFile, deleteRoleFile } from './role-resolver.js';
 import type { LarkMessage, DaemonToWorker } from '../types.js';
 import { sessionKey, sessionAnchorId } from './types.js';
 import type { DaemonSession } from './types.js';
@@ -28,7 +29,7 @@ import { t, localeForBot, type Locale } from '../i18n/index.js';
 
 // ─── Exported constants ──────────────────────────────────────────────────────
 
-export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/skip', '/schedule', '/login', '/adopt', '/oncall', '/group', '/g']);
+export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/skip', '/schedule', '/role', '/login', '/adopt', '/oncall', '/group', '/g']);
 
 /**
  * Slash commands that are forwarded verbatim to the underlying CLI (e.g.
@@ -46,7 +47,7 @@ export interface SlashCommandInvocation {
   content: string;
 }
 
-const MULTILINE_COMMANDS = new Set(['/schedule']);
+const MULTILINE_COMMANDS = new Set(['/schedule', '/role']);
 
 // `validateWorkingDir` now lives in ./working-dir.js (leaf module the CLI can
 // import without the daemon graph); re-exported here for existing callers.
@@ -172,6 +173,60 @@ export interface CommandHandlerDeps {
 }
 
 // ─── Schedule command ────────────────────────────────────────────────────────
+
+async function handleRoleCommand(
+  args: string,
+  rootId: string,
+  chatId: string,
+  workingDir: string,
+  deps: CommandHandlerDeps,
+  larkAppId?: string,
+): Promise<void> {
+  const sessionReply = (rid: string, content: string, msgType?: string) =>
+    deps.sessionReply(rid, content, msgType, larkAppId);
+  const trimmed = args.trim();
+  const loc = localeForBot(larkAppId);
+
+  // /role → show current role
+  if (!trimmed) {
+    const content = resolveRoleFile(workingDir, chatId);
+    if (content) {
+      const len = Buffer.byteLength(content, 'utf-8');
+      await sessionReply(rootId, `${t('role.current', undefined, loc)}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: len, max: 4096 }, loc)}`);
+    } else {
+      await sessionReply(rootId, t('role.empty', undefined, loc));
+    }
+    return;
+  }
+
+  // /role set <content> — write role file
+  const setMatch = trimmed.match(/^set\s+([\s\S]+)/);
+  if (setMatch) {
+    const content = setMatch[1].trim();
+    if (!content) {
+      await sessionReply(rootId, t('role.set_empty', undefined, loc));
+      return;
+    }
+    writeRoleFile(workingDir, chatId, content);
+    const len = Buffer.byteLength(content, 'utf-8');
+    await sessionReply(rootId, t('role.saved_via_cmd', { bytes: len, max: 4096 }, loc));
+    return;
+  }
+
+  // /role delete
+  if (trimmed === 'delete' || trimmed === '删除') {
+    const existed = deleteRoleFile(workingDir, chatId);
+    if (existed) {
+      await sessionReply(rootId, t('role.deleted_via_cmd', undefined, loc));
+    } else {
+      await sessionReply(rootId, t('role.nothing_to_delete', undefined, loc));
+    }
+    return;
+  }
+
+  // /role help — fallback
+  await sessionReply(rootId, t('role.help', undefined, loc));
+}
 
 async function handleScheduleCommand(
   args: string,
@@ -433,6 +488,7 @@ export async function handleCommand(
               { name: selfBot.botName, openId: selfBot.botOpenId },
               loc,
               ds.pendingSender,
+              { workingDir: ds.workingDir ?? botCfg.workingDir, chatId: ds.chatId },
             );
             rememberLastCliInput(ds, pendingPrompt, prompt);
             ds.pendingPrompt = undefined;
@@ -512,6 +568,7 @@ export async function handleCommand(
             { name: selfBot.botName, openId: selfBot.botOpenId },
             loc,
             ds.pendingSender,
+            { workingDir: ds.workingDir ?? botCfg.workingDir, chatId: ds.chatId },
           );
           rememberLastCliInput(ds, pendingPrompt, prompt);
           ds.pendingPrompt = undefined;
@@ -565,6 +622,24 @@ export async function handleCommand(
         const chatId = ds?.chatId!;
         await handleScheduleCommand(scheduleArgs, rootId, chatId, deps, larkAppId);
         logger.info(`[${logTag}] Schedule command handled`);
+        break;
+      }
+
+      case '/role': {
+        const chatId = ds?.chatId;
+        if (!chatId) {
+          await sessionReply(rootId, t('role.no_chat', undefined, loc));
+          break;
+        }
+        const bot = larkAppId ? getBot(larkAppId) : null;
+        const workingDir = ds?.workingDir ?? bot?.config?.workingDir;
+        if (!workingDir) {
+          await sessionReply(rootId, t('role.no_working_dir', undefined, loc));
+          break;
+        }
+        const roleArgs = message.content.replace(/^\/role\s*/, '');
+        await handleRoleCommand(roleArgs, rootId, chatId, workingDir, deps, larkAppId);
+        logger.info(`[${logTag}] Role command handled`);
         break;
       }
 

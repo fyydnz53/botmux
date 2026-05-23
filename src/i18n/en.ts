@@ -235,6 +235,18 @@ export const messages: Record<string, string> = {
   'ai.bridge.mentions_label': '[@Mentions]',
   'schedule.title_prefix': '[Scheduled]',
 
+  // ─── Role command ─────────────────────────────────────────────────────────
+  'role.current': '📋 Current role for this chat:',
+  'role.byte_count': '{bytes} / {max} bytes',
+  'role.empty': 'No role configured for this chat.\n\nUsage:\n/role set <Markdown content> — Set role\n/role — View current role\n/role delete — Delete role',
+  'role.saved_via_cmd': '✅ Role updated ({bytes} / {max} bytes). Takes effect on next message.',
+  'role.deleted_via_cmd': '✅ Role deleted.',
+  'role.nothing_to_delete': 'No role configured for this chat.',
+  'role.set_empty': 'Role content cannot be empty. Usage: /role set <Markdown content>',
+  'role.no_chat': 'Cannot determine chat info. Please retry.',
+  'role.no_working_dir': 'Cannot determine working directory. Check bot configuration.',
+  'role.help': '/role usage:\n• /role — View current role\n• /role set <Markdown content> — Set role\n• /role delete — Delete role',
+
   // ─── Card handler responses ──────────────────────────────────────────────
   'card.action.adopt_no_restart': '⚠️ Restart is disabled in adopt mode (it would not touch your tmux pane / CLI process anyway).',
   'card.action.restarted': '🔄 Restarted {cliName}',

@@ -303,13 +303,14 @@ const server = createServer(async (req, res) => {
             // Strip per-bot fields from chat-level so the merged record stays
             // bot-agnostic. oncallChat lives inside memberBots; firstSeenAt is
             // accumulated as the earliest observation across all bots.
-            const { oncallChat, firstSeenAt, ...chatBase } = c;
+            const { oncallChat, firstSeenAt, hasRole, ...chatBase } = c;
             const cur = out.get(c.chatId) ?? { ...chatBase, memberBots: [] as any[], _firstSeenAt: null as number | null };
             cur.memberBots.push({
               larkAppId: d.larkAppId,
               botName: d.botName,
               inChat: true,
               oncallChat: oncallChat ?? null,
+              hasRole: hasRole ?? false,
             });
             if (typeof firstSeenAt === 'number') {
               cur._firstSeenAt = cur._firstSeenAt === null
@@ -325,7 +326,7 @@ const server = createServer(async (req, res) => {
         const present = new Set<string>(c.memberBots.map((mb: any) => mb.larkAppId));
         for (const b of onlineBots) {
           if (!present.has(b.larkAppId)) {
-            c.memberBots.push({ larkAppId: b.larkAppId, botName: b.botName, inChat: false, oncallChat: null });
+            c.memberBots.push({ larkAppId: b.larkAppId, botName: b.botName, inChat: false, oncallChat: null, hasRole: false });
           }
         }
       }
@@ -345,6 +346,42 @@ const server = createServer(async (req, res) => {
         chats: sorted,
         bots: onlineBots.map(b => ({ larkAppId: b.larkAppId, botName: b.botName })),
       });
+    }
+
+    // ─── Roles (proxy to daemon) ────────────────────────────────────────────
+    // GET    /api/roles/:larkAppId/:chatId → read role file
+    // PUT    /api/roles/:larkAppId/:chatId → write role file
+    // DELETE /api/roles/:larkAppId/:chatId → delete role file
+
+    let mRole: RegExpMatchArray | null;
+    if ((mRole = url.pathname.match(/^\/api\/roles\/([^/]+)\/([^/]+)$/))) {
+      const larkAppId = decodeURIComponent(mRole[1]);
+      const chatId = decodeURIComponent(mRole[2]);
+      if (req.method === 'GET') {
+        const upstream = await proxyToDaemon(larkAppId, `/api/roles/${encodeURIComponent(chatId)}`, { method: 'GET' });
+        res.writeHead(upstream.status, { 'content-type': 'application/json' });
+        res.end(await upstream.text());
+        return;
+      }
+      if (req.method === 'PUT') {
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(c as Buffer);
+        const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+        const upstream = await proxyToDaemon(larkAppId, `/api/roles/${encodeURIComponent(chatId)}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: raw,
+        });
+        res.writeHead(upstream.status, { 'content-type': 'application/json' });
+        res.end(await upstream.text());
+        return;
+      }
+      if (req.method === 'DELETE') {
+        const upstream = await proxyToDaemon(larkAppId, `/api/roles/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+        res.writeHead(upstream.status, { 'content-type': 'application/json' });
+        res.end(await upstream.text());
+        return;
+      }
     }
 
     let m2: RegExpMatchArray | null;
