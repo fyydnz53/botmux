@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { appendTriggerLog } from '../src/services/trigger-log-store.js';
 
 let server: Server | null = null;
 let baseUrl = '';
@@ -124,5 +125,42 @@ describe('connector-api write routes', () => {
 
     const deleted = await json(await fetch(`${baseUrl}/api/webhook-secrets/${encodeURIComponent(created.secretRef)}`, { method: 'DELETE' }));
     expect(deleted.deleted).toBe(true);
+  });
+
+  it('serves trigger log filters, connector stats, and explicit prune', async () => {
+    const created = await json(await fetch(`${baseUrl}/api/connectors`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Logged connector',
+        target: { mode: 'dynamic', kind: 'turn', botId: 'app1' },
+      }),
+    }));
+    const id = created.connector.id;
+    appendTriggerLog({ triggerId: 'old', connectorId: id, action: 'queued', status: 'ok', createdAt: '2026-05-20T00:00:00.000Z' }, dataDir);
+    appendTriggerLog({ triggerId: 'rate', connectorId: id, action: 'failed', status: 'error', errorCode: 'rate_limited', createdAt: '2026-05-24T00:01:00.000Z' }, dataDir);
+    appendTriggerLog({ triggerId: 'sig', connectorId: 'missing', action: 'failed', status: 'error', errorCode: 'invalid_signature', createdAt: '2026-05-24T00:02:00.000Z' }, dataDir);
+
+    const filtered = await json(await fetch(`${baseUrl}/api/trigger-logs?status=error&errorCode=rate_limited`));
+    expect(filtered.logs.map((x: any) => x.triggerId)).toEqual(['rate']);
+
+    const stats = await json(await fetch(`${baseUrl}/api/connectors/stats`));
+    expect(stats.stats.find((s: any) => s.connectorId === id)).toMatchObject({
+      name: 'Logged connector',
+      total: 2,
+      ok: 1,
+      error: 1,
+      lastErrorCode: 'rate_limited',
+    });
+    expect(stats.stats.find((s: any) => s.connectorId === 'missing')).toMatchObject({ total: 1, error: 1 });
+
+    const pruned = await json(await fetch(`${baseUrl}/api/trigger-logs/prune`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ maxEntries: 1 }),
+    }));
+    expect(pruned).toMatchObject({ ok: true, before: 3, after: 1, deleted: 2 });
+    const remaining = await json(await fetch(`${baseUrl}/api/trigger-logs?limit=10`));
+    expect(remaining.logs.map((x: any) => x.triggerId)).toEqual(['sig']);
   });
 });

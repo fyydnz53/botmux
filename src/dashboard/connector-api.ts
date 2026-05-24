@@ -14,7 +14,8 @@ import {
   listWebhookSecretRefs,
   setWebhookSecret,
 } from '../services/webhook-key.js';
-import { listTriggerLogs } from '../services/trigger-log-store.js';
+import { listTriggerLogs, pruneTriggerLogs, summarizeTriggerLogs, type TriggerLogStats } from '../services/trigger-log-store.js';
+import type { TriggerErrorCode } from '../services/trigger-types.js';
 import { jsonRes } from './workflow-api.js';
 
 const DEFAULT_VERIFY_HEADERS = {
@@ -57,6 +58,14 @@ function positiveInt(v: unknown, fallback: number, min = 1, max = Number.MAX_SAF
 
 function hasOwn(obj: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function logStatus(v: string | null): 'ok' | 'error' | undefined {
+  return v === 'ok' || v === 'error' ? v : undefined;
+}
+
+function emptyStats(connectorId: string): TriggerLogStats {
+  return { connectorId, total: 0, ok: 0, error: 0, actions: {}, errorCodes: {} };
 }
 
 function normalizeConnectorInput(
@@ -172,6 +181,25 @@ export async function handleConnectorApi(
 ): Promise<boolean> {
   if (req.method === 'GET' && url.pathname === '/api/connectors') {
     jsonRes(res, 200, { connectors: listConnectors() });
+    return true;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/connectors/stats') {
+    const since = url.searchParams.get('since') ?? undefined;
+    const rawStats = summarizeTriggerLogs({ since });
+    const byId = new Map(rawStats.filter(s => s.connectorId).map(s => [s.connectorId!, s]));
+    const connectors = listConnectors();
+    const known = new Set(connectors.map(c => c.id));
+    const stats: Array<TriggerLogStats & { name?: string; enabled?: boolean }> = connectors.map(c => ({
+      name: c.name,
+      enabled: c.enabled,
+      ...emptyStats(c.id),
+      ...byId.get(c.id),
+    }));
+    for (const stat of rawStats) {
+      if (!stat.connectorId || !known.has(stat.connectorId)) stats.push(stat);
+    }
+    jsonRes(res, 200, { stats });
     return true;
   }
 
@@ -311,7 +339,26 @@ export async function handleConnectorApi(
   if (req.method === 'GET' && url.pathname === '/api/trigger-logs') {
     const limit = Number(url.searchParams.get('limit') ?? '100');
     const connectorId = url.searchParams.get('connectorId') ?? undefined;
-    jsonRes(res, 200, { logs: listTriggerLogs({ limit, connectorId }) });
+    const status = logStatus(url.searchParams.get('status'));
+    const errorCode = url.searchParams.get('errorCode') as TriggerErrorCode | null;
+    const since = url.searchParams.get('since') ?? undefined;
+    jsonRes(res, 200, { logs: listTriggerLogs({ limit, connectorId, status, errorCode: errorCode ?? undefined, since }) });
+    return true;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/trigger-logs/prune') {
+    try {
+      const body = await readJsonBody<{ retentionDays?: unknown; maxEntries?: unknown }>(req);
+      const retentionDays = body.retentionDays === undefined
+        ? undefined
+        : positiveInt(body.retentionDays, 14, 1, 3650);
+      const maxEntries = body.maxEntries === undefined
+        ? undefined
+        : positiveInt(body.maxEntries, 1000, 1, 1_000_000);
+      jsonRes(res, 200, { ok: true, ...pruneTriggerLogs({ retentionDays, maxEntries }) });
+    } catch (e: any) {
+      jsonRes(res, 400, { ok: false, error: e?.message ?? 'bad_json' });
+    }
     return true;
   }
 
