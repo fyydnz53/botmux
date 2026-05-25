@@ -118,7 +118,7 @@ describe('handleTeamRoute', () => {
     // after the token gate). This bmx_session route is mounted BEFORE that gate, so
     // it must return false for them — otherwise they 401 (no session) / 404 (session).
     for (const p of [
-      '/api/team/local', '/api/team/local-invite', '/api/team/rename-deployment',
+      '/api/team/local', '/api/team/local-invite', '/api/team/rename-deployment', '/api/team/federated-group',
       '/api/team/join-remote', '/api/team/remote-roster', '/api/team/sync-remote', '/api/team/leave-remote',
     ]) {
       const res = makeRes();
