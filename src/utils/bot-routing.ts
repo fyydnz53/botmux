@@ -133,3 +133,36 @@ export function buildFooterAddressing(
 
   return { sendTo: caller, cc: [] };
 }
+
+/**
+ * Ordered, de-duplicated @ recipients for the footer `发送给：` line.
+ *
+ * All real mentions (the human addressee + explicit mention targets + cc) are
+ * consolidated onto one footer line instead of dangling a trailing @ block at
+ * the bottom of the card body. The human addressee (`sendTo`) goes first, then
+ * explicit mention targets (which may include sibling bots for a handoff), then
+ * cc. Ids already rendered inline inside the body prose (`inlinedIds`) are
+ * skipped so the same person isn't @-ed twice.
+ *
+ * Placement only — these were already real Lark mentions wherever they sat, so
+ * notification / cross-bot wake behaviour is unchanged.
+ */
+export function orderedFooterRecipients(opts: {
+  sendTo?: string;
+  mentionIds?: string[];
+  cc?: string[];
+  inlinedIds?: Iterable<string>;
+}): string[] {
+  const seen = new Set<string>(opts.inlinedIds ?? []);
+  const out: string[] = [];
+  const push = (id?: string) => {
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  };
+  push(opts.sendTo);
+  for (const id of opts.mentionIds ?? []) push(id);
+  for (const id of opts.cc ?? []) push(id);
+  return out;
+}

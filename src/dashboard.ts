@@ -737,6 +737,7 @@ const server = createServer(async (req, res) => {
             online: true,
             defaultOncall: j.defaultOncall,
             autoboundChatCount: j.autoboundChatCount ?? 0,
+            brandLabel: j.brandLabel ?? null,
           };
         } catch (e: any) {
           return { larkAppId: d.larkAppId, botName: d.botName, online: true, error: e?.message ?? String(e) };
@@ -752,6 +753,24 @@ const server = createServer(async (req, res) => {
       for await (const c of req) chunks.push(c as Buffer);
       const raw = Buffer.concat(chunks).toString('utf8') || '{}';
       const upstream = await proxyToDaemon(appId, `/api/bot-default-oncall`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: raw,
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // PUT /api/bots/:appId/brand-label — proxy to that bot's daemon. Body
+    // `{ brandLabel: string | null }` (string '' = off, null = default).
+    let mBotBrand: RegExpMatchArray | null;
+    if (req.method === 'PUT' && (mBotBrand = url.pathname.match(/^\/api\/bots\/([^/]+)\/brand-label$/))) {
+      const appId = decodeURIComponent(mBotBrand[1]);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+      const upstream = await proxyToDaemon(appId, `/api/bot-brand-label`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: raw,

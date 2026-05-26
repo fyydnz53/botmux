@@ -6,6 +6,7 @@ import * as scheduleStore from '../services/schedule-store.js';
 import * as groupsStore from '../services/groups-store.js';
 import { createGroupWithBots } from '../services/group-creator.js';
 import * as oncallStore from '../services/oncall-store.js';
+import * as brandStore from '../services/brand-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry } from './worker-pool.js';
@@ -484,7 +485,23 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     botName: getBotName(),
     defaultOncall: defaultOncall ?? { enabled: false, workingDir: '', since: 0 },
     autoboundChatCount: autoboundChats.length,
+    brandLabel: brandStore.getBotBrandLabel(cachedLarkAppId) ?? null,
   });
+});
+
+// Per-bot card footer brand label. Body `{ brandLabel: string | null }`:
+//   • string (incl. '')  → store verbatim ('' = brand off)
+//   • null / absent      → clear the key (revert to default botmux brand)
+ipcRoute('PUT', '/api/bot-brand-label', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  let body: { brandLabel?: unknown };
+  try { body = await readJsonBody<{ brandLabel?: unknown }>(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+
+  const next: string | null = typeof body.brandLabel === 'string' ? body.brandLabel : null;
+  const r = await brandStore.updateBotBrandLabel(cachedLarkAppId, next);
+  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
+  jsonRes(res, 200, { ok: true, brandLabel: r.brandLabel });
 });
 
 ipcRoute('PUT', '/api/bot-default-oncall', async (req, res) => {

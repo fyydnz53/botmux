@@ -43,6 +43,7 @@ import {
   CARD_POSTING_SENTINEL,
   parkStreamCard,
   closeSession as closeSessionHelper,
+  ensureCliEnv,
 } from './core/worker-pool.js';
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
@@ -113,6 +114,12 @@ import { resolveWait } from './workflows/wait.js';
 import { replay } from './workflows/events/replay.js';
 import { isValidRunId, readRunSnapshot } from './workflows/ops-projection.js';
 import { AttemptResumeManager } from './workflows/attempt-resume.js';
+import {
+  setCardDispatcher as setAskCardDispatcher,
+  registerAsk as registerAskBroker,
+} from './core/ask-broker.js';
+import { parseAskBody, resolveAskApprovers } from './core/ask-api.js';
+import { createLarkAskCardDispatcher } from './im/lark/ask-card.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -1432,6 +1439,80 @@ ipcRoute('POST', '/api/workflows/definitions/:id/run', async (req, res, params) 
   return jsonRes(res, 200, result);
 });
 
+// ─── botmux ask v0.1.7 IPC route ─────────────────────────────────────────────
+//
+// CLI side: `botmux ask buttons --options "..."` POSTs here and keeps the
+// connection open until the broker settles the ask. Long keep-alive is OK —
+// the request's lifetime is bounded by `body.timeoutMs` which the broker
+// enforces. Default fetch on the CLI side has no read timeout.
+
+ipcRoute('POST', '/api/asks', async (req, res) => {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody<unknown>(req);
+  } catch {
+    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+  }
+  const parsed = parseAskBody(raw);
+  if ('error' in parsed) return jsonRes(res, 400, { ok: false, error: parsed.error });
+
+  const approvers = resolveAskApprovers({
+    larkAppId: parsed.larkAppId,
+    sessionId: parsed.sessionId,
+    explicit: parsed.approvers,
+    getBotAllowedUsers: (id) => {
+      try { return getBot(id).resolvedAllowedUsers; } catch { return []; }
+    },
+    getSessionOwner: (sid) => {
+      for (const ds of activeSessions.values()) {
+        if (ds.session.sessionId === sid) return ds.ownerOpenId;
+      }
+      return undefined;
+    },
+  });
+  if (approvers.size === 0) {
+    // Nobody can answer — fail loud rather than registering a
+    // guaranteed-timeout. CLI side maps this to exit 2.
+    return jsonRes(res, 400, { ok: false, error: 'no_approvers' });
+  }
+
+  const result = await registerAskBroker({
+    larkAppId: parsed.larkAppId,
+    chatId: parsed.chatId,
+    rootMessageId: parsed.rootMessageId,
+    sessionId: parsed.sessionId,
+    approvers,
+    questions: parsed.questions,
+    timeoutMs: parsed.timeoutMs,
+  });
+  return jsonRes(res, 200, result);
+});
+
+// ─── adopt-session 查询端点 ───────────────────────────────────────────────────
+// CLI side（botmux hook）通过祖先 PID 匹配 adopt 会话，路由 askUserQuestion。
+// GET /api/adopt-session/:pid — 返回该 pid 对应的 adopt 会话路由信息。
+// 仅匹配**当前活跃**的 adopt 会话（按 originalCliPid）。残留风险：OS 的 PID 复用——
+// 若原 adopt 的 Claude 已退出、同号 PID 被别的进程复用，理论上可能误命中；但 hook
+// 进程是该 Claude 的子孙，只有 Claude 仍在跑时其祖先链里才会出现这个 PID，且 session
+// 必须仍在 activeSessions 里，复用窗口极小，可接受（不为此引入进程级鉴权）。
+ipcRoute('GET', '/api/adopt-session/:pid', (_req, res, params) => {
+  const pid = Number(params.pid);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return jsonRes(res, 400, { ok: false, error: 'bad_pid' });
+  }
+  for (const ds of activeSessions.values()) {
+    if (ds.adoptedFrom?.originalCliPid === pid) {
+      return jsonRes(res, 200, {
+        sessionId: ds.session.sessionId,
+        chatId: ds.chatId,
+        larkAppId: ds.larkAppId,
+        rootMessageId: sessionAnchorId(ds),
+      });
+    }
+  }
+  return jsonRes(res, 404, { ok: false, error: 'no_adopt_session' });
+});
+
 function parseTriggerChatBinding(
   raw: unknown,
 ): { chatId: string; larkAppId: string } | undefined {
@@ -2288,12 +2369,19 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   }
   const cfg = botConfigs[idx];
   registerBot(cfg);
+  // 启动即为本 bot 的 CLI 预装环境（skills + askUserQuestion hook + 兜底 skill）。
+  // 关键：adopt 路径会跳过 ensureCliSkills，若重启后第一次就是 adopt 一个外部
+  // claude 会话，必须保证此时全局 ~/.claude/settings.json 已带 hook——否则"全局
+  // hook 适配 adopt"不成立。这里幂等、best-effort，不阻塞启动。
+  try { ensureCliEnv(cfg.cliId, cfg.cliPathOverride); }
+  catch (err) { logger.warn(`[hook] startup ensureCliEnv failed for ${cfg.cliId}: ${err instanceof Error ? err.message : String(err)}`); }
   sessionStore.init(cfg.larkAppId);
   chatFirstSeenStore.init(cfg.larkAppId);
   // Watch schedules.json for external writes (e.g. `botmux schedule add`
   // running in a separate node process) so dashboard event bus stays in sync.
   scheduleStore.startExternalWriteWatcher();
   logger.info(`Bot ${idx}/${botConfigs.length}: ${cfg.larkAppId} (cli: ${cfg.cliId})`)
+  setAskCardDispatcher(createLarkAskCardDispatcher());
 
   writePidFile();
   const memoryDiagnostics = startMemoryDiagnostics();

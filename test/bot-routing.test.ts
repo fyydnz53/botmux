@@ -12,6 +12,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildFooterAddressing,
   hasKnownBotMention,
+  orderedFooterRecipients,
   pickBotEntryByName,
 } from '../src/utils/bot-routing.js';
 
@@ -189,5 +190,48 @@ describe('buildFooterAddressing', () => {
       { ownerOpenId: 'ou_codex_bot' },
       { isOncall: false, knownBotOpenIds },
     )).toEqual({ sendTo: undefined, cc: [] });
+  });
+});
+
+describe('orderedFooterRecipients', () => {
+  it('puts the human addressee first, then explicit mention targets', () => {
+    expect(orderedFooterRecipients({
+      sendTo: 'ou_human',
+      mentionIds: ['ou_bot_a', 'ou_bot_b'],
+    })).toEqual(['ou_human', 'ou_bot_a', 'ou_bot_b']);
+  });
+
+  it('de-dupes when a mention target equals the human addressee', () => {
+    // --mention-back @ 了触发者，footer 又指向同一个 owner/caller
+    expect(orderedFooterRecipients({
+      sendTo: 'ou_human',
+      mentionIds: ['ou_human', 'ou_bot_a'],
+    })).toEqual(['ou_human', 'ou_bot_a']);
+  });
+
+  it('skips ids already inlined in the body prose', () => {
+    expect(orderedFooterRecipients({
+      sendTo: 'ou_human',
+      mentionIds: ['ou_bot_a', 'ou_bot_b'],
+      inlinedIds: new Set(['ou_bot_a']),
+    })).toEqual(['ou_human', 'ou_bot_b']);
+  });
+
+  it('omits the human addressee when there is none (e.g. --top-level)', () => {
+    expect(orderedFooterRecipients({
+      mentionIds: ['ou_bot_a'],
+    })).toEqual(['ou_bot_a']);
+  });
+
+  it('appends cc after mention targets, de-duped', () => {
+    expect(orderedFooterRecipients({
+      sendTo: 'ou_human',
+      mentionIds: ['ou_bot_a'],
+      cc: ['ou_bot_a', 'ou_cc'],
+    })).toEqual(['ou_human', 'ou_bot_a', 'ou_cc']);
+  });
+
+  it('returns empty when nothing to address', () => {
+    expect(orderedFooterRecipients({})).toEqual([]);
   });
 });

@@ -768,6 +768,18 @@ function extractElementText(el: any, parts: string[], imgLabel: (key: string) =>
 
   const tag = el.tag;
 
+  // botmux card footer: the only element rendered as a small grey notation
+  // (text_size 'notation_small_v2' + a grey <font> wrapper). Drop it
+  // structurally — brand-agnostic, so a peer bot's *custom* brandLabel footer
+  // is stripped from cross-bot / quote / history prompts without us needing to
+  // know its label (the receiving bot can't see the sender's config). The
+  // repo-URL line filter below still covers the default brand in the simplified
+  // Format A representation, which carries no text_size.
+  if ((tag === 'markdown' || tag === 'div' || tag === 'plain_text') && el.text_size === 'notation_small_v2') {
+    const c = el.text?.content ?? el.content ?? '';
+    if (/color=['"]grey['"]/i.test(c)) return;
+  }
+
   // div / markdown / plain_text blocks
   if (tag === 'div' || tag === 'markdown' || tag === 'plain_text') {
     const text = el.text?.content ?? el.content;

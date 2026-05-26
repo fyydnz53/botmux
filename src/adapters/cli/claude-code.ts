@@ -388,13 +388,10 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
         args.push('--session-id', sessionId);
       }
       args.push('--dangerously-skip-permissions');
-      // Suppress the first-run "--dangerously-skip-permissions" risk-acceptance
-      // screen for this spawn only. In a fresh $HOME that has never accepted it,
-      // Claude Code otherwise blocks on an interactive confirmation that botmux
-      // can't answer — it mistypes the user's message into the dialog and the
-      // session breaks (observed as `tmux send-keys … failed`). An inline
-      // --settings JSON is scoped to this process, so it never mutates the
-      // user's global ~/.claude/settings.json or their interactive claude.
+      // 内联 --settings JSON 作用域仅限本次 spawn，不会写入用户全局 ~/.claude/settings.json。
+      // 注意：askUserQuestion hook 不在这里注入——它要写全局 settings.json（见下方
+      // hookInstall），这样 adopt 模式（botmux 接管的是别处已启动、拿不到本 --settings
+      // 的 claude 会话）才能让那条会话读到 hook。
       args.push('--settings', JSON.stringify({
         skipDangerousModePermissionPrompt: true,
         permissions: { defaultMode: 'bypassPermissions' },
@@ -712,6 +709,16 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
     systemHints: [],
     altScreen: false,
     skillsDir: '~/.claude/skills',
+    // askUserQuestion hook 写全局 ~/.claude/settings.json（matcher='AskUserQuestion' 的 PreToolUse），
+    // 把 AskUserQuestion 事件转发到 `botmux hook claude-code`。
+    // 选全局而非进程级 --settings：adopt 模式接管的是 botmux 没启动、拿不到 --settings
+    // 的已有 claude 会话，只有全局配置那条会话才读得到。代价是会作用于非 botmux 的
+    // claude 会话，但 hook 客户端在缺 BOTMUX_* env 时直接 passthrough 放行，不破坏它们。
+    hookInstall: {
+      configPath: '~/.claude/settings.json',
+      format: 'claude-settings',
+    },
+    asksViaHook: true,
   };
 }
 

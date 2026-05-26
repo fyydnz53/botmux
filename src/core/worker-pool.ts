@@ -7,7 +7,9 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { ensureSkills } from '../skills/installer.js';
+import { ensureSkills, ensureAskSkill } from '../skills/installer.js';
+import { installHook } from '../adapters/hook-installer.js';
+import { hookCommandFor } from '../adapters/hook-command.js';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 import * as sessionStore from '../services/session-store.js';
@@ -21,7 +23,7 @@ import { botLocale, localeForBot, t as tr } from '../i18n/index.js';
 import { claudeJsonlPathForSession } from '../adapters/cli/claude-code.js';
 import { buildMarkdownCard, buildContextualReplyCard } from '../im/lark/md-card.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
-import { getBot, getAllBots } from '../bot-registry.js';
+import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
@@ -90,6 +92,19 @@ export function getActiveSessionsRegistry(): Map<string, DaemonSession> | undefi
   return activeSessionsRegistry;
 }
 
+// ─── Terminal URL helpers ──────────────────────────────────────────────────
+// config.web.externalHost is a live getter (re-resolves the LAN IP each read
+// when WEB_EXTERNAL_HOST is unset), so building the URL fresh at every card
+// render/patch is enough to keep links pointing at the current network.
+
+function terminalReadUrl(port: number): string {
+  return `http://${config.web.externalHost}:${port}`;
+}
+
+function terminalWriteUrl(port: number, token: string): string {
+  return `${terminalReadUrl(port)}?token=${encodeURIComponent(token)}`;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function tag(ds: DaemonSession): string {
@@ -151,7 +166,7 @@ function scheduleUsageLimitCardPatch(ds: DaemonSession): void {
 
   const bot = getBot(ds.larkAppId);
   const effectiveCliId = sessionCliId(ds, bot.config);
-  const readUrl = `http://${config.web.externalHost}:${port}`;
+  const readUrl = terminalReadUrl(port);
   const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
   const cardJson = buildStreamingCard(
     ds.session.sessionId,
@@ -381,6 +396,17 @@ export function ensureCliSkills(cliId: CliId, cliPathOverride?: string): void {
   if (skillsInstalledCliIds.has(cliId)) return;
   const adapter = createCliAdapterSync(cliId, cliPathOverride);
   ensureSkills(cliId, adapter.skillsDir);
+  // askUserQuestion 接管策略：hook 优先 + 非 hook CLI 用 skill 兜底。
+  // - asksViaHook=true（Claude/OpenCode）：通过 hook 拦截原生 AskUserQuestion，删掉
+  //   botmux-ask skill，避免 skill 与 hook 双重弹卡。
+  //   Claude 走 --settings 进程级注入；OpenCode 走 hookInstall 插件写文件。
+  // - asksViaHook 未设（Codex/Cursor/尚未接 hook 的终端原生 CLI）：保留 botmux-ask
+  //   skill 作兜底，让 agent 仍可用 `botmux ask` 把选择题引到飞书。
+  if (adapter.hookInstall) {
+    try { installHook(cliId, adapter.hookInstall, hookCommandFor(cliId)); }
+    catch (err) { logger.warn(`[hook] install failed for ${cliId}: ${err instanceof Error ? err.message : String(err)}`); }
+  }
+  ensureAskSkill(cliId, adapter.skillsDir, !adapter.asksViaHook);
   skillsInstalledCliIds.add(cliId);
 }
 
@@ -757,8 +783,8 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         // Persist port so it can be reused after daemon restart
         ds.session.webPort = msg.port;
         sessionStore.updateSession(ds.session);
-        const readOnlyUrl = `http://${config.web.externalHost}:${msg.port}`;
-        const writeUrl = `${readOnlyUrl}?token=${msg.token}`;
+        const readOnlyUrl = terminalReadUrl(msg.port);
+        const writeUrl = terminalWriteUrl(msg.port, msg.token);
         logger.info(`[${t}] Worker ready, terminal at ${readOnlyUrl}`);
         if (ds.usageLimit) {
           ds.lastScreenStatus = 'limited';
@@ -1229,6 +1255,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           assistantText: msg.assistantText,
           assistantLabel: getCliDisplayName(effectiveCliId),
           recipientOpenId,
+          brand: resolveBrandLabel(ds.larkAppId),
         });
         cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId).catch((err: any) => {
           logger.warn(`[${t}] Failed to deliver adopt_preamble to Lark: ${err.message}`);
@@ -1309,8 +1336,9 @@ function deliverFinalOutput(
             assistantText: msg.content,
             assistantLabel: getCliDisplayName(effectiveCliId),
             recipientOpenId,
+            brand: resolveBrandLabel(ds.larkAppId),
           })
-        : buildMarkdownCard(msg.content, recipientOpenId);
+        : buildMarkdownCard(msg.content, recipientOpenId, resolveBrandLabel(ds.larkAppId));
       await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
       ds.lastBridgeEmittedUuid = msg.lastUuid;
       logger.info(`[${t}] Bridge final_output forwarded (turn ${msg.turnId.substring(0, 8)}, ${msg.content.length} chars, kind=${msg.kind ?? 'bridge'}, attempt ${attempt + 1})`);

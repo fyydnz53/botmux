@@ -54,6 +54,7 @@ import {
   buildFooterAddressing,
   hasKnownBotMention,
   knownBotOpenIdsFromCrossRef,
+  orderedFooterRecipients,
   type BotMentionEntry,
 } from './utils/bot-routing.js';
 import { isLocale, setDefaultLocale, SUPPORTED_LOCALES, type Locale } from './i18n/index.js';
@@ -2569,7 +2570,8 @@ function argValues(args: string[], ...flags: string[]): string[] {
 // Card v2 body builder helpers — extracted to im/lark/md-card.ts so the
 // daemon's bridge fallback path can produce identical cards. cmdSend
 // keeps using `buildCardBodyElements` and `hasMarkdown` from there.
-import { buildCardBodyElements, hasMarkdown } from './im/lark/md-card.js';
+import { buildCardBodyElements, hasMarkdown, brandFooterSegment } from './im/lark/md-card.js';
+import { resolveBrandLabel } from './bot-registry.js';
 import { config } from './config.js';
 import { resolveQuoteTarget, validateMentionDecision } from './services/send-policy.js';
 
@@ -2830,22 +2832,13 @@ async function cmdSend(rest: string[]): Promise<void> {
     // --no-mention 显式不 @ 任何人 → 连 footer 的"发送给/cc"寻址 <at> 也清空，
     // 否则 footer 仍会 @ 人，与 --no-mention 语义和"未@任何人"输出自相矛盾
     // （Codex review P2）。--top-level 同样无特定收件人。
-    const footerAddressingRaw = (sendTopLevel || noMention)
+    const footerAddressing = (sendTopLevel || noMention)
       ? { sendTo: undefined as string | undefined, cc: [] as string[] }
       : buildFooterAddressing(s, {
           isOncall: !!oncallEntry,
           hasExplicitBotMention: explicitKnownBotMention,
           knownBotOpenIds,
         });
-    // De-dupe vs body @: if someone is already @'d in the body (典型是
-    // --mention-back @ 了触发者，而 footer 的"发送给"又指向同一个 owner/caller)，
-    // 从 footer 去掉，避免一条消息里出现两个相同的 @。
-    const bodyMentionIds = new Set(mentions.map(m => m.open_id));
-    const footerAddressing = {
-      sendTo: footerAddressingRaw.sendTo && !bodyMentionIds.has(footerAddressingRaw.sendTo)
-        ? footerAddressingRaw.sendTo : undefined,
-      cc: footerAddressingRaw.cc.filter(id => !bodyMentionIds.has(id)),
-    };
 
     // Decide: interactive card (renders markdown) vs. post (plain text).
     // Explicit --card / --text wins; otherwise auto-detect markdown syntax.
@@ -2880,9 +2873,9 @@ async function cmdSend(rest: string[]): Promise<void> {
           return `<at id=${openId}></at>`;
         });
       }
-      const trailingAts: string[] = [];
-      for (const m of mentions) if (!usedIds.has(m.open_id)) trailingAts.push(`<at id=${m.open_id}></at>`);
-      if (trailingAts.length > 0) md = md ? `${md}\n\n${trailingAts.join(' ')}` : trailingAts.join(' ');
+      // Non-inlined mentions are no longer dangled as a trailing @ block at the
+      // body bottom — they're consolidated onto the footer `发送给：` line below
+      // (human addressee first, then explicit targets). See orderedFooterRecipients.
 
       // Inline images into the markdown via ![](img_key). If caller used an
       // `![alt](img:N)` placeholder, substitute by 0-based index; any remaining
@@ -2910,20 +2903,33 @@ async function cmdSend(rest: string[]): Promise<void> {
       // Oncall groups usually address whoever triggered this turn (may not be
       // the session owner). Bot recipients are filtered out so footer chrome
       // cannot accidentally wake a sibling bot.
-      const footerParts = ['[botmux](https://github.com/deepcoldy/botmux)'];
-      // Top-level publish has no specific recipient — drop "发送给/cc" addressing
-      // so the message doesn't @ the session owner who isn't even in the target chat.
-      const addressing = footerAddressing;
-      if (addressing.sendTo) footerParts.push(`发送给：<at id=${addressing.sendTo}></at>`);
-      if (addressing.cc.length > 0) {
-        footerParts.push(`cc：${addressing.cc.map(id => `<at id=${id}></at>`).join(' ')}`);
-      }
-      elements.push({ tag: 'hr' });
-      elements.push({
-        tag: 'markdown',
-        text_size: 'notation_small_v2',
-        content: `<font color='grey'>${footerParts.join(' · ')}</font>`,
+      // Brand segment honours this bot's configured brandLabel (unset →
+      // default botmux, '' → suppressed, else custom). Same resolver/rule as
+      // the daemon's card builders so both send paths render identically.
+      const footerParts: string[] = [];
+      const brandSeg = brandFooterSegment(resolveBrandLabel(appId));
+      if (brandSeg) footerParts.push(brandSeg);
+      // All real mentions land on one footer line: human addressee first, then
+      // explicit @ targets (incl. handoff bots), then cc. Ids already inlined in
+      // the body prose are skipped. Top-level publish keeps sendTo empty.
+      const footerRecipients = orderedFooterRecipients({
+        sendTo: footerAddressing.sendTo,
+        mentionIds: mentions.map(m => m.open_id),
+        cc: footerAddressing.cc,
+        inlinedIds: usedIds,
       });
+      if (footerRecipients.length > 0) {
+        footerParts.push(`发送给：${footerRecipients.map(id => `<at id=${id}></at>`).join(' ')}`);
+      }
+      // Empty brand + no recipients → no footer at all (skip the orphan HR).
+      if (footerParts.length > 0) {
+        elements.push({ tag: 'hr' });
+        elements.push({
+          tag: 'markdown',
+          text_size: 'notation_small_v2',
+          content: `<font color='grey'>${footerParts.join(' · ')}</font>`,
+        });
+      }
 
       const cardJson = JSON.stringify({
         schema: '2.0',
@@ -2950,28 +2956,24 @@ async function cmdSend(rest: string[]): Promise<void> {
 
       for (const key of imageKeys) postContent.push([{ tag: 'img', image_key: key }]);
 
-      if (mentions.length > 0) {
-        const usedIds = new Set<string>();
-        for (const para of postContent) for (const n of para) if (n.tag === 'at') usedIds.add(n.user_id);
-        const unused = mentions.filter(m => !usedIds.has(m.open_id));
-        if (unused.length > 0) {
-          if (postContent.length === 0) postContent.push([]);
-          for (const m of unused) postContent[postContent.length - 1].push({ tag: 'at', user_id: m.open_id });
-        }
-      }
-
-      // Footer: mirror the card layout — a blank paragraph separates the body
-      // from the addressing line(s). Top-level publish has no specific
-      // recipient; bot recipients are filtered out by footerAddressing.
-      const addressing = footerAddressing;
-      if (addressing.sendTo || addressing.cc.length > 0) {
+      // Footer: mirror the card layout — all real mentions go on one
+      // `发送给：` line (human addressee first, then explicit targets, then cc),
+      // separated from the body by a blank paragraph. Ids already inlined in the
+      // body prose are skipped. Top-level publish keeps sendTo empty.
+      const inlinedIds = new Set<string>();
+      for (const para of postContent) for (const n of para) if (n.tag === 'at') inlinedIds.add(n.user_id);
+      const footerRecipients = orderedFooterRecipients({
+        sendTo: footerAddressing.sendTo,
+        mentionIds: mentions.map(m => m.open_id),
+        cc: footerAddressing.cc,
+        inlinedIds,
+      });
+      if (footerRecipients.length > 0) {
         if (postContent.length > 0) postContent.push([{ tag: 'text', text: '' }]);
-        if (addressing.sendTo) {
-          postContent.push([{ tag: 'text', text: '发送给：' }, { tag: 'at', user_id: addressing.sendTo }]);
-        }
-        if (addressing.cc.length > 0) {
-          postContent.push([{ tag: 'text', text: 'cc：' }, ...addressing.cc.map(id => ({ tag: 'at', user_id: id }))]);
-        }
+        postContent.push([
+          { tag: 'text', text: '发送给：' },
+          ...footerRecipients.map(id => ({ tag: 'at', user_id: id })),
+        ]);
       }
 
       const postJson = JSON.stringify({ zh_cn: { title: '', content: postContent } });
@@ -3208,6 +3210,355 @@ botmux create-group — 用一组机器人新建飞书群
 
 // ─── Bots subcommand ─────────────────────────────────────────────────────────
 
+// ─── botmux ask v0.1.7 ───────────────────────────────────────────────────────
+//
+// CLI agent inside a botmux-spawned session calls `botmux ask buttons
+// --options "..." "<prompt>"`. Daemon sends a Lark card; user clicks; CLI
+// process unblocks with the selected key (or exit 124 on timeout, exit 3 if
+// the daemon dies). See /tmp/botmux-ask.md (or design memory).
+
+/**
+ * postAsk: 找到 daemon → POST /api/asks → 返回 AskResult。
+ * 连接失败 / HTTP 错误时抛出带 exitCode 属性的 Error：
+ *   - exitCode=3：daemon 不可达或 HTTP 非 400
+ *   - exitCode=2：400 + no_approvers
+ */
+async function postAsk(body: Record<string, unknown>): Promise<import('./core/ask-types.js').AskResult> {
+  type AskResult = import('./core/ask-types.js').AskResult;
+
+  const larkAppId = body.larkAppId as string;
+  const daemon = findDaemon(larkAppId);
+  if (!daemon) {
+    const err = new Error(
+      `botmux ask: 找不到 daemon (larkAppId=${larkAppId})。daemon 已停？exit 3.`,
+    ) as Error & { exitCode: number };
+    err.exitCode = 3;
+    throw err;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/asks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      // No client-side timeout — broker enforces `timeoutMs` and will respond
+      // with `kind:'timedOut'` so this fetch always settles.
+    });
+  } catch (fetchErr) {
+    const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+    const err = new Error(
+      `botmux ask: 无法连接 daemon (port=${daemon.ipcPort}): ${msg}`,
+    ) as Error & { exitCode: number };
+    err.exitCode = 3;
+    throw err;
+  }
+
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = (await res.text()).slice(0, 200); } catch { /* */ }
+    if (res.status === 400 && /no_approvers/.test(errBody)) {
+      const err = new Error(
+        'botmux ask: 当前会话没有可批准者（session.owner 不在 bot.allowedUsers 里，且 --approver 未指定）',
+      ) as Error & { exitCode: number };
+      err.exitCode = 2;
+      throw err;
+    }
+    const err = new Error(`botmux ask: daemon HTTP ${res.status}: ${errBody}`) as Error & { exitCode: number };
+    err.exitCode = 3;
+    throw err;
+  }
+
+  try {
+    return (await res.json()) as AskResult;
+  } catch (jsonErr) {
+    const err = new Error(`botmux ask: daemon 返回非 JSON: ${jsonErr}`) as Error & { exitCode: number };
+    err.exitCode = 3;
+    throw err;
+  }
+}
+
+async function cmdAsk(sub: string, rest: string[]): Promise<void> {
+  // Workflow-subagent safety gate (same posture as cmdSend): a CLI running
+  // inside a workflow subagent (Slice F) must not surface chat UI. Workflow
+  // approvals belong in humanGate / decision nodes so the choice is part of
+  // the run's event log; an ad-hoc `botmux ask` would bypass that audit
+  // trail entirely.
+  if (process.env.BOTMUX_WORKFLOW === '1') {
+    const runId = process.env.BOTMUX_WORKFLOW_RUN_ID ?? '?';
+    const nodeId = process.env.BOTMUX_WORKFLOW_NODE_ID ?? '?';
+    console.error(
+      `botmux ask refused inside workflow subagent (run=${runId} node=${nodeId}).\n` +
+        `Workflow subagents must surface approvals via humanGate / decision nodes\n` +
+        `so the resolution is recorded in the run's event log; ask would bypass it.`,
+    );
+    process.exit(2);
+  }
+
+  // Only `buttons` shipped in v0.1.7. The bare alias (`botmux ask --options`)
+  // routes here with sub='' — accept it and behave identically. `ask text` /
+  // `ask confirm` are reserved for later versions.
+  if (sub && sub !== 'buttons') {
+    console.error(
+      `botmux ask: 未知 subcommand "${sub}"（v0.1.7 仅支持 \`buttons\` 或省略）`,
+    );
+    process.exit(2);
+  }
+
+  const { findMissingAskEnv, parseAskOptions, parseAskTimeoutSeconds, AskArgsError } =
+    await import('./core/ask-args.js');
+  type AskJsonOutput = import('./core/ask-types.js').AskJsonOutput;
+  const { toLegacySelected } = await import('./core/ask-types.js');
+
+  const missing = findMissingAskEnv(process.env);
+  if (missing) {
+    console.error(
+      `botmux ask: 缺少必需环境变量 ${missing}。` +
+        ` 请在 botmux daemon spawn 的 CLI 会话内运行。`,
+    );
+    process.exit(2);
+  }
+
+  const optionsRaw = argValue(rest, '--options');
+  const timeoutRaw = argValue(rest, '--timeout');
+  const useJson = rest.includes('--json');
+  const approverArgs = argValues(rest, '--approver');
+  const positionalArgs = positionals(rest, ['--json']);
+
+  let options;
+  let timeoutMs;
+  try {
+    options = parseAskOptions(optionsRaw);
+    timeoutMs = parseAskTimeoutSeconds(timeoutRaw);
+  } catch (err) {
+    if (err instanceof AskArgsError) {
+      console.error(`botmux ask: ${err.message}`);
+      process.exit(2);
+    }
+    throw err;
+  }
+
+  const prompt = positionalArgs.join(' ').trim();
+  if (!prompt) {
+    console.error(
+      'botmux ask: 缺少 prompt。用法: botmux ask buttons --options "yes,no" "继续发版吗？"',
+    );
+    process.exit(2);
+  }
+
+  const larkAppId = process.env.BOTMUX_LARK_APP_ID!;
+  const body = {
+    sessionId: process.env.BOTMUX_SESSION_ID!,
+    chatId: process.env.BOTMUX_CHAT_ID!,
+    larkAppId,
+    rootMessageId: process.env.BOTMUX_ROOT_MESSAGE_ID || null,
+    options,
+    prompt,
+    timeoutMs,
+    approvers: approverArgs,
+  };
+
+  let result;
+  try {
+    result = await postAsk(body);
+  } catch (err) {
+    const code = (err as any).exitCode ?? 3;
+    console.error((err as Error).message);
+    process.exit(code);
+  }
+
+  // result.kind==='answered' 时用 toLegacySelected 取回旧的 string（单问单选）
+  const selected = toLegacySelected(result);
+
+  if (useJson) {
+    const out: AskJsonOutput = {
+      selected,
+      answers: result.kind === 'answered' ? (result.answers as string[][]) : null,
+      by: result.kind === 'answered' ? result.by : null,
+      comment: null,
+      timedOut: result.kind === 'timedOut',
+    };
+    process.stdout.write(JSON.stringify(out) + '\n');
+  } else if (result.kind === 'answered') {
+    // 非 JSON 模式：输出 selected key（单问单选），多选/多问输出空字符串
+    process.stdout.write((selected ?? '') + '\n');
+  }
+
+  switch (result.kind) {
+    case 'answered':
+      process.exit(0);
+    case 'timedOut':
+      console.error(`botmux ask: 超时（${timeoutMs / 1000}s），无回复`);
+      process.exit(124);
+    case 'invalidated':
+      console.error(`botmux ask: 已失效 (${result.reason})`);
+      process.exit(3);
+  }
+}
+
+// ─── botmux hook <cliId> ──────────────────────────────────────────────────────
+//
+// hook 模式：各 CLI hook 配置调用 `botmux hook <cliId>`，stdin 注入 hook payload，
+// 本命令解析问题 → POST /api/asks → 等结果 → 写 directive 到 stdout。
+// 任何失败（daemon 不可达、env 缺失、解析错误）均输出 passthrough directive 并 exit 0，
+// 绝不挂死，保证 CLI 可以继续原生终端提问。
+
+/**
+ * runHook: hook 命令的纯业务逻辑，接受已解析的 payload/env/postAskFn，
+ * 返回应写到 stdout 的字符串。通过依赖注入使单元测试无需真实 daemon/env。
+ *
+ * @param payload              已经 JSON.parse 的 hook payload 对象
+ * @param env                  包含 BOTMUX_* 环境变量的字典
+ * @param postAskFn            替代真实 postAsk 的可注入函数（测试用）
+ * @param cliId                CLI 适配器 ID
+ * @param resolveAdoptRouteFn  可选：替代真实 adopt 路由解析的注入函数（测试用）；
+ *                             缺省时使用真实 resolveAdoptRoute（查祖先 PID → daemon）
+ * @returns                    { stdout: string } 应写到 stdout 的内容
+ */
+export async function runHook(
+  payload: unknown,
+  env: Record<string, string | undefined>,
+  postAskFn: (body: Record<string, unknown>) => Promise<import('./core/ask-types.js').AskResult>,
+  cliId: string,
+  resolveAdoptRouteFn?: () => Promise<import('./adapters/adopt-route.js').AdoptRoute | null>,
+): Promise<{ stdout: string }> {
+  const { getHookAdapter } = await import('./core/ask-hook/registry.js');
+
+  // 未知 cliId → 无 adapter，输出空字符串静默放行
+  const adapter = getHookAdapter(cliId);
+  if (!adapter) {
+    return { stdout: '' };
+  }
+
+  // Workflow-subagent 安全门：workflow 子 agent 内直接 passthrough
+  if (env.BOTMUX_WORKFLOW === '1') {
+    return { stdout: adapter.passthrough(payload) };
+  }
+
+  // 解析问题：非 askUserQuestion 类事件 → passthrough 放行
+  const parsed = adapter.parseQuestions(payload);
+  if (!parsed) {
+    return { stdout: adapter.passthrough(payload) };
+  }
+
+  // 检查必需的 BOTMUX_* env
+  const sessionId = env.BOTMUX_SESSION_ID;
+  const chatId = env.BOTMUX_CHAT_ID;
+  const larkAppId = env.BOTMUX_LARK_APP_ID;
+
+  // 路由变量：优先用 env，env 缺失时尝试 adopt 路由
+  let routeSessionId = sessionId;
+  let routeChatId = chatId;
+  let routeLarkAppId = larkAppId;
+  let routeRoot: string | null = env.BOTMUX_ROOT_MESSAGE_ID || null;
+
+  if (!sessionId || !chatId || !larkAppId) {
+    // env 缺失 → 尝试通过祖先 PID 匹配在线 adopt 会话
+    const resolver = resolveAdoptRouteFn ?? (() => {
+      // 延迟 import 避免冷启动开销
+      return import('./adapters/adopt-route.js').then(({ resolveAdoptRoute, queryAdoptSession }) =>
+        resolveAdoptRoute({
+          startPid: process.pid,
+          listDaemons: listOnlineDaemons,
+          queryDaemon: queryAdoptSession,
+        }),
+      );
+    });
+    let adopt: import('./adapters/adopt-route.js').AdoptRoute | null = null;
+    try {
+      adopt = await resolver();
+    } catch {
+      // 解析失败 → 视作真非 botmux 会话，passthrough 放行
+    }
+    if (!adopt) {
+      // 真非 botmux 会话 → passthrough 放行
+      return { stdout: adapter.passthrough(payload) };
+    }
+    // adopt 命中 → 使用 adopt 路由信息
+    routeSessionId = adopt.sessionId;
+    routeChatId = adopt.chatId;
+    routeLarkAppId = adopt.larkAppId;
+    routeRoot = adopt.rootMessageId;
+  }
+
+  // 解析 timeoutMs：默认 1 小时，可由 BOTMUX_ASK_TIMEOUT_MS 覆盖
+  const DEFAULT_TIMEOUT_MS = 3_600_000;
+  let timeoutMs = DEFAULT_TIMEOUT_MS;
+  const timeoutEnv = env.BOTMUX_ASK_TIMEOUT_MS;
+  if (timeoutEnv) {
+    const parsed_timeout = parseInt(timeoutEnv, 10);
+    if (Number.isInteger(parsed_timeout) && parsed_timeout > 0) {
+      timeoutMs = parsed_timeout;
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    sessionId: routeSessionId,
+    chatId: routeChatId,
+    larkAppId: routeLarkAppId,
+    rootMessageId: routeRoot,
+    questions: parsed.questions,
+    timeoutMs,
+    approvers: [],
+  };
+
+  let result: import('./core/ask-types.js').AskResult;
+  try {
+    result = await postAskFn(body);
+  } catch {
+    // 任何失败（daemon 不可达、HTTP 错误等）→ passthrough 放行
+    return { stdout: adapter.passthrough(payload) };
+  }
+
+  if (result.kind === 'answered') {
+    return { stdout: adapter.formatAnswer(result.answers, parsed) };
+  }
+
+  // timedOut / invalidated → passthrough 放行
+  return { stdout: adapter.passthrough(payload) };
+}
+
+/**
+ * cmdHook: `botmux hook <cliId>` 入口。
+ * 读取 stdin 全文 → JSON.parse → runHook → 写 stdout，exit 0。
+ */
+async function cmdHook(cliId: string): Promise<void> {
+  // 读取 stdin 全文
+  let stdinText = '';
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    stdinText = Buffer.concat(chunks).toString('utf-8');
+  } catch {
+    // stdin 读取失败 → 无法处理，静默退出
+    process.exit(0);
+  }
+
+  // JSON.parse 失败 → 输出空并退出（不挂死）
+  let payload: unknown;
+  try {
+    payload = JSON.parse(stdinText);
+  } catch {
+    process.exit(0);
+  }
+
+  const { getHookAdapter } = await import('./core/ask-hook/registry.js');
+  const adapter = getHookAdapter(cliId);
+  // 未知 cliId → 静默放行
+  if (!adapter) {
+    process.exit(0);
+  }
+
+  const env = process.env as Record<string, string | undefined>;
+  const result = await runHook(payload, env, postAsk, cliId);
+  if (result.stdout) {
+    console.log(result.stdout);
+  }
+  process.exit(0);
+}
+
 async function cmdBots(sub: string, rest: string[]): Promise<void> {
   process.env.SESSION_DATA_DIR ??= resolveDataDir();
 
@@ -3412,6 +3763,20 @@ switch (command) {
   case 'rm':      cmdDelete(); break;
   case 'resume':  await cmdResume(); break;
   case 'schedule': await cmdSchedule(process.argv[3] ?? '', process.argv.slice(4)); break;
+  case 'ask': {
+    // `botmux ask buttons --options ...` → sub='buttons', rest=['--options', ...]
+    // `botmux ask --options ...`         → sub='',        rest=['--options', ...]  (bare alias)
+    const { normalizeAskDispatch } = await import('./core/ask-args.js');
+    const { sub, rest } = normalizeAskDispatch(process.argv.slice(3));
+    await cmdAsk(sub, rest);
+    break;
+  }
+  case 'hook': {
+    // `botmux hook <cliId>` — hook 客户端，stdin 读 payload，stdout 写 directive
+    const cliId = process.argv[3] ?? '';
+    await cmdHook(cliId);
+    break;
+  }
   case 'workflow': {
     const { cmdWorkflow } = await import('./cli/workflow.js');
     await cmdWorkflow(process.argv[3] ?? '', process.argv.slice(4));

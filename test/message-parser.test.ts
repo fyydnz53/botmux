@@ -309,6 +309,40 @@ describe('Interactive card parsing: botmux footer is stripped from prompt', () =
   });
 });
 
+// ─── Structural footer strip (brand-agnostic, for per-bot custom brands) ──
+
+describe('Interactive card parsing: footer stripped structurally (custom brand)', () => {
+  it('drops a custom-brand grey notation_small_v2 footer element (no botmux URL to anchor on)', () => {
+    // A peer bot configured brandLabel='Acme' — the receiving bot can't know
+    // that label, so the URL anchor can't catch it. The text_size+grey
+    // structural signal does.
+    const card = {
+      body: { elements: [
+        { tag: 'markdown', content: '正文内容' },
+        { tag: 'hr' },
+        { tag: 'markdown', text_size: 'notation_small_v2',
+          content: "<font color='grey'>[Acme](https://acme.test) · 发送给：<at id=ou_owner></at></font>" },
+      ] },
+    };
+    const result = parseApiMessage(makeMsg('interactive', card));
+    expect(result.content).toContain('正文内容');
+    expect(result.content).not.toContain('Acme');
+    expect(result.content).not.toContain('发送给');
+  });
+
+  it('keeps a small-text element that is NOT a grey footer (foreign card content survives)', () => {
+    // notation_small_v2 alone is not enough — the botmux footer is always grey.
+    // A foreign card's small note without grey font must not be dropped.
+    const card = {
+      body: { elements: [
+        { tag: 'markdown', text_size: 'notation_small_v2', content: '报警时间 17:45' },
+      ] },
+    };
+    const result = parseApiMessage(makeMsg('interactive', card));
+    expect(result.content).toContain('报警时间 17:45');
+  });
+});
+
 // ─── mergeCardText: A+B union ─────────────────────────────────────────────
 
 describe('mergeCardText', () => {

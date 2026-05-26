@@ -68,6 +68,15 @@ export interface BotConfig {
   defaultOncallAutoboundChats?: string[];
   /** Per-chat per-user grants: chat_id → 被授权的 open_id 列表。仅放行 canTalk，不给管理命令权。 */
   chatGrants?: { [chatId: string]: string[] };
+  /**
+   * Custom footer brand label for cards this bot sends. Three states:
+   *   • `undefined` (unset)  → default `[botmux](github)` link
+   *   • `''` (empty)         → brand suppressed (footer shows only 发送给 if any)
+   *   • any other string     → rendered verbatim (markdown allowed)
+   * Resolved via {@link resolveBrandLabel}. Pure cosmetic — does not affect
+   * routing or permissions.
+   */
+  brandLabel?: string;
 }
 
 export interface BotState {
@@ -212,6 +221,52 @@ export function isChatOncallBoundForAnyBot(chatId: string): boolean {
   return !!findOncallChatForAnyBot(chatId);
 }
 
+// Per-bot brand label, mtime-cached for the disk fallback. Keyed by larkAppId →
+// the configured value (undefined when the bot has no brandLabel key).
+let brandLabelCache: { mtimeMs: number; map: Map<string, string | undefined> } | null = null;
+
+/** Resolve the bots.json path the same way loadBotConfigs does, without
+ *  requiring the registry to have been loaded (works in one-shot CLI processes
+ *  like `botmux send`). Returns null when no config file exists. */
+function botsConfigDiskPath(): string | null {
+  const env = process.env.BOTS_CONFIG;
+  if (env) { const r = resolve(env); return existsSync(r) ? r : null; }
+  const d = resolve(homedir(), '.botmux', 'bots.json');
+  return existsSync(d) ? d : null;
+}
+
+/**
+ * The configured brand label for a bot, or `undefined` when unset (`''` = off
+ * is preserved). Prefers the in-memory registry (daemon hot path); falls back
+ * to a mtime-cached read of bots.json so the CLI process — which never loads
+ * the registry — still resolves the sending bot's brand. Callers feed the
+ * result into {@link brandFooterSegment} for the unset→default / ''→off rule.
+ */
+export function resolveBrandLabel(larkAppId: string): string | undefined {
+  const inMem = bots.get(larkAppId);
+  if (inMem) return inMem.config.brandLabel;
+  const path = loadedConfigPath ?? botsConfigDiskPath();
+  if (!path) return undefined;
+  try {
+    const stat = statSync(path);
+    if (!brandLabelCache || brandLabelCache.mtimeMs !== stat.mtimeMs) {
+      const raw = JSON.parse(readFileSync(path, 'utf-8'));
+      const map = new Map<string, string | undefined>();
+      if (Array.isArray(raw)) {
+        for (const e of raw) {
+          if (e && typeof e.larkAppId === 'string') {
+            map.set(e.larkAppId, typeof e.brandLabel === 'string' ? e.brandLabel : undefined);
+          }
+        }
+      }
+      brandLabelCache = { mtimeMs: stat.mtimeMs, map };
+    }
+    return brandLabelCache.map.get(larkAppId);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Load bot configurations from one of (in priority order):
  * 1. BOTS_CONFIG env var — path to a JSON file
@@ -350,6 +405,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         : undefined,
       chatGrants,
       lang: isLocale(entry.lang) ? entry.lang : undefined,
+      // Preserve '' distinctly from undefined: '' means "brand off", undefined
+      // means "use default botmux brand". Don't trim-to-undefined here.
+      brandLabel: typeof entry.brandLabel === 'string' ? entry.brandLabel : undefined,
     });
   }
 

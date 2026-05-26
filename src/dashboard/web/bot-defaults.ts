@@ -133,8 +133,36 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
           <button type="button" data-action="save">${t('botDefaults.save')}</button>
           <span class="oncall-status" data-status></span>
         </div>
+        ${renderBrandSection(b)}
       </div>
     </article>`;
+  }
+
+  // brandLabel is null when unset (→ default botmux), '' when off, else custom.
+  // The input shows the configured string ('' for both unset and off); a small
+  // state line disambiguates which of the three the bot is currently in.
+  function brandStateLabel(brand: string | null): string {
+    if (brand == null) return t('botDefaults.brandStateDefault');
+    return brand.trim() === '' ? t('botDefaults.brandStateOff') : t('botDefaults.brandStateCustom');
+  }
+
+  function renderBrandSection(b: any): string {
+    const brand: string | null = b.brandLabel ?? null;
+    return `<div class="bd-row bd-brand">
+      <label>
+        <span>${t('botDefaults.brandLabel')}</span>
+        <input type="text" data-input="brandLabel"
+          placeholder="${escapeHtml(t('botDefaults.brandLabelPlaceholder'))}"
+          value="${escapeHtml(brand ?? '')}">
+      </label>
+      <small data-brand-state>${escapeHtml(brandStateLabel(brand))}</small>
+      <small>${t('botDefaults.brandLabelHelp')}</small>
+      <div class="actions">
+        <button type="button" data-action="save-brand">${t('botDefaults.brandSave')}</button>
+        <button type="button" data-action="reset-brand">${t('botDefaults.brandReset')}</button>
+        <span class="oncall-status" data-brand-status></span>
+      </div>
+    </div>`;
   }
 
   function wireCardHandlers() {
@@ -198,6 +226,55 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
           saveBtn.disabled = false;
         }
       });
+
+      // ── Brand label (independent of oncall save) ──────────────────────────
+      const brandInput = card.querySelector<HTMLInputElement>('input[data-input=brandLabel]');
+      const brandSaveBtn = card.querySelector<HTMLButtonElement>('button[data-action=save-brand]');
+      const brandResetBtn = card.querySelector<HTMLButtonElement>('button[data-action=reset-brand]');
+      const brandStatusEl = card.querySelector<HTMLSpanElement>('[data-brand-status]');
+      const brandStateEl = card.querySelector<HTMLElement>('[data-brand-state]');
+
+      // PUT the given brandLabel (string '' = off, null = revert to default),
+      // then reflect the new state inline without a full rerender.
+      async function putBrand(brandLabel: string | null, btn: HTMLButtonElement) {
+        if (!brandStatusEl) return;
+        brandStatusEl.textContent = '';
+        brandStatusEl.className = 'oncall-status';
+        btn.disabled = true;
+        try {
+          const r = await fetch(`/api/bots/${encodeURIComponent(appId)}/brand-label`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ brandLabel }),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (r.ok && body.ok) {
+            const next: string | null = body.brandLabel ?? null;
+            brandStatusEl.textContent = '✓';
+            brandStatusEl.classList.add('hint-ok');
+            if (brandInput) brandInput.value = next ?? '';
+            if (brandStateEl) brandStateEl.textContent = brandStateLabel(next);
+            const cached = cache.bots.find((b: any) => b.larkAppId === appId);
+            if (cached) cached.brandLabel = next;
+          } else {
+            brandStatusEl.textContent = `✗ ${body.error ?? r.status}`;
+            brandStatusEl.classList.add('hint-warn-inline');
+          }
+        } catch (e: any) {
+          brandStatusEl.textContent = `✗ ${e?.message ?? e}`;
+          brandStatusEl.classList.add('hint-warn-inline');
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      if (brandInput && brandSaveBtn) {
+        // Empty input saved as '' = brand off (per "配置为空就可以关").
+        brandSaveBtn.addEventListener('click', () => putBrand(brandInput.value, brandSaveBtn));
+      }
+      if (brandResetBtn) {
+        brandResetBtn.addEventListener('click', () => putBrand(null, brandResetBtn));
+      }
     });
   }
 

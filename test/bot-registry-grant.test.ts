@@ -15,6 +15,19 @@ describe('bot-registry grant additions', () => {
     expect(cfgs[0].chatGrants).toBeUndefined();
   });
 
+  it('parseBotConfigsFromText preserves brandLabel, distinguishing unset/off/custom', () => {
+    const cfgs = parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'b_unset', larkAppSecret: 's' },
+      { larkAppId: 'b_off', larkAppSecret: 's', brandLabel: '' },
+      { larkAppId: 'b_custom', larkAppSecret: 's', brandLabel: '[Acme](https://acme.test)' },
+      { larkAppId: 'b_nonstring', larkAppSecret: 's', brandLabel: 42 },
+    ]));
+    expect(cfgs[0].brandLabel).toBeUndefined();         // unset → default at render time
+    expect(cfgs[1].brandLabel).toBe('');                // '' preserved → off
+    expect(cfgs[2].brandLabel).toBe('[Acme](https://acme.test)');
+    expect(cfgs[3].brandLabel).toBeUndefined();         // non-string ignored
+  });
+
   it('getOwnerOpenId returns first ou_ in resolvedAllowedUsers', () => {
     registerBot({ larkAppId: 'a2', larkAppSecret: 's', cliId: 'claude-code', allowedUsers: ['x@y.com', 'ou_owner', 'ou_2'] });
     expect(getOwnerOpenId('a2')).toBe('ou_owner');
