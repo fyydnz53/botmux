@@ -118,17 +118,18 @@ export function getDeploymentByToken(dataDir: string, syncToken: string): { team
 }
 
 /** Refresh a deployment's advertised bots + heartbeat, by syncToken. Returns true if found. */
-export function syncDeployment(dataDir: string, syncToken: string, bots: FederatedBot[], owner?: { ownerUnionId?: string; ownerName?: string }, now: number = Date.now()): boolean {
+export function syncDeployment(dataDir: string, syncToken: string, bots: FederatedBot[], owner?: { ownerUnionId?: string; ownerName?: string; name?: string }, now: number = Date.now()): boolean {
   const data = readFile(dataDir);
   for (const list of Object.values(data.teams)) {
     const deployment = list.find(d => d.syncToken === syncToken);
     if (deployment) {
       deployment.bots = bots;
       deployment.lastSeenAt = now;
-      // Owner can be bound after join — keep it fresh on sync (only overwrite
-      // when the spoke actually sends one).
+      // Owner + name can change after join (e.g. binding adopts the owner's
+      // Feishu name) — keep them fresh on sync, only overwriting when sent.
       if (owner?.ownerUnionId !== undefined) deployment.ownerUnionId = owner.ownerUnionId;
       if (owner?.ownerName !== undefined) deployment.ownerName = owner.ownerName;
+      if (owner?.name) deployment.name = owner.name; // non-empty only → roster grouping follows the owner's Feishu name
       writeFileAtomic(dataDir, data);
       return true;
     }

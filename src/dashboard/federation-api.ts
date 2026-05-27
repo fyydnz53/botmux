@@ -197,6 +197,7 @@ export async function handleFederationApi(
     const ok = syncDeployment(dataDir, syncToken, sanitizeBots(body?.bots), {
       ownerUnionId: typeof body?.ownerUnionId === 'string' ? body.ownerUnionId : undefined,
       ownerName: typeof body?.ownerName === 'string' ? body.ownerName : undefined,
+      name: typeof body?.name === 'string' ? body.name : undefined,
     });
     if (!ok) { jsonRes(res, 403, { ok: false, error: 'unknown_token' }); return true; }
     jsonRes(res, 200, { ok: true });

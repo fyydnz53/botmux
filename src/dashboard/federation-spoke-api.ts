@@ -142,7 +142,7 @@ export async function syncAllMemberships(dataDir: string, fetcher: Fetcher = fet
       const r = await fetchWithTimeout(fetcher, `${m.hubUrl}/api/federation/sync`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${m.syncToken}` },
-        body: JSON.stringify({ syncToken: m.syncToken, bots, ownerUnionId: me.ownerUnionId, ownerName: me.ownerName }),
+        body: JSON.stringify({ syncToken: m.syncToken, bots, ownerUnionId: me.ownerUnionId, ownerName: me.ownerName, name: me.name }),
       });
       if (r.ok) synced++; else failed++;
     } catch { failed++; }

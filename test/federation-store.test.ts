@@ -92,6 +92,18 @@ describe('federation-store (hub)', () => {
     expect(syncDeployment(dataDir, 'bogus', [], undefined, 6000)).toBe(false);
   });
 
+  it('syncDeployment propagates a changed name + owner (binding adopts the Feishu name)', () => {
+    const { syncToken } = registerDeployment(dataDir, 'default', { deploymentId: 'dep_x', name: 'n37-097-123', bots: [] }, 1000);
+    expect(syncDeployment(dataDir, syncToken, [bot('cli_a')], { ownerUnionId: 'on_x', ownerName: '申晗', name: '申晗' }, 5000)).toBe(true);
+    const d = listFederatedDeployments(dataDir, 'default')[0];
+    expect(d.name).toBe('申晗');        // Hub-side grouping name follows the owner's Feishu name
+    expect(d.ownerUnionId).toBe('on_x');
+    expect(d.ownerName).toBe('申晗');
+    // empty name on a later sync must NOT wipe it
+    expect(syncDeployment(dataDir, syncToken, [bot('cli_a')], { name: '' }, 6000)).toBe(true);
+    expect(listFederatedDeployments(dataDir, 'default')[0].name).toBe('申晗');
+  });
+
   it('removeDeployment / removeTeamFederation drop records', () => {
     registerDeployment(dataDir, 'default', { deploymentId: 'dep_x', name: 'X', bots: [] });
     registerDeployment(dataDir, 'default', { deploymentId: 'dep_y', name: 'Y', bots: [] });
