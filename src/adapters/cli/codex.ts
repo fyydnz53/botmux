@@ -141,19 +141,25 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
     },
 
     async writeInput(pty: PtyHandle, content: string) {
-      // Codex's TUI in --no-alt-screen mode does NOT handle bracketed paste:
-      // wrapping content in \x1b[200~...\x1b[201~ via tmux paste-buffer
-      // makes Codex exit cleanly (code 0) — it parses the ESC as an abort.
-      // So we stick with the older `send-keys -l` raw-stream path that has
-      // worked historically.
+      // Codex's input mode treats every literal \n as Enter. The old path
+      // (`send-keys -l` with the whole multi-line blob) therefore submitted
+      // each line as its own turn — a single Lark message fragmented into
+      // several user messages / "Queued follow-up inputs" in the TUI, and a
+      // literal \t in the content also leaked through as a Tab keystroke.
       //
-      // Known limitation: Codex's input mode treats every \n as Enter, so a
-      // multi-line burst submits one-line fragments until Codex's internal
-      // paste-detection finally kicks in — visible as e.g. the tail of
-      // "Session ID: <uuid>" stranded in the input box. The verification
-      // loop below catches that case (the full content prefix never appears
-      // in history.jsonl) and surfaces it via user_notify rather than
-      // silently dropping the message.
+      // Fix: bracketed paste, same as coco.ts. tmux `load-buffer` +
+      // `paste-buffer -d -p` wraps the content in \x1b[200~...\x1b[201~ when
+      // the pane has bracketed paste on (Codex enables it), so embedded \n
+      // stay content and only the trailing Enter after the delay submits.
+      // The old "Codex exits on bracketed paste (parses ESC as abort)" note
+      // was true for a much earlier build; verified on codex 0.134.0 that a
+      // bracketed paste lands the whole multi-line message in the composer
+      // un-submitted, with the process staying alive and \t absorbed cleanly.
+      //
+      // The history.jsonl verification loop below is unchanged: it polls for
+      // the submitted prefix and, if it never appears, surfaces the failure
+      // via the worker's deferred recheck + Lark warning rather than silently
+      // dropping the message.
       const trySendEnter = (): boolean => {
         try {
           if (pty.sendSpecialKeys) pty.sendSpecialKeys('Enter');
@@ -170,8 +176,15 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
       const marker = historyMarker(content);
 
       try {
-        if (pty.sendText) pty.sendText(content);
-        else pty.write(content);
+        if (pty.pasteText) {
+          // tmux mode: load-buffer + paste-buffer -d -p. The `-p` flag emits
+          // bracketed-paste markers when the pane has them on (Codex default);
+          // `-d` deletes the buffer after so it doesn't accumulate.
+          pty.pasteText(content);
+        } else {
+          // Non-tmux fallback (raw PTY): wrap the markers ourselves.
+          pty.write('\x1b[200~' + content + '\x1b[201~');
+        }
       } catch {
         return { submitted: false };
       }
