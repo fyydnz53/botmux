@@ -22,6 +22,8 @@ export interface TerminalProxyOptions {
   host?: string;
   /** Resolve a sessionId to its live worker HTTP port (undefined if not running). */
   resolvePort: (sessionId: string) => number | undefined;
+  /** Max upward port probes when `port` is taken (EADDRINUSE). Default 20; 0 disables. */
+  maxProbe?: number;
 }
 
 export interface TerminalProxyHandle {
@@ -129,19 +131,38 @@ export function startTerminalProxy(opts: TerminalProxyOptions): Promise<Terminal
     upstream.end();
   });
 
-  server.on('error', (err) => {
-    logger.error(`[terminal-proxy] server error: ${(err as Error).message}`);
-  });
+  // When the preferred port is taken, probe upward to the next free port so the
+  // proxy always comes up on a single stable-ish port (the daemon advertises the
+  // actually-bound port via getTerminalProxyPort, so links auto-follow). After
+  // maxProbe exhausted attempts it rejects → daemon falls back to direct ports.
+  const maxProbe = opts.maxProbe ?? 20;
 
   return new Promise<TerminalProxyHandle>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(opts.port, host, () => {
-      server.removeListener('error', reject);
-      const port = (server.address() as { port: number }).port;
-      resolve({
-        port,
-        close: () => new Promise<void>((r) => server.close(() => r())),
+    let port = opts.port;
+    let attempts = 0;
+    const onError = (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE' && attempts < maxProbe) {
+        attempts++;
+        logger.warn(`[terminal-proxy] port ${port} in use, trying ${port + 1}`);
+        port++;
+        setImmediate(tryListen);
+        return;
+      }
+      reject(err);
+    };
+    const tryListen = () => {
+      server.once('error', onError);
+      server.listen(port, host, () => {
+        server.removeListener('error', onError);
+        const bound = (server.address() as { port: number }).port;
+        // Runtime error handler for post-bind failures.
+        server.on('error', (err) => logger.error(`[terminal-proxy] server error: ${(err as Error).message}`));
+        resolve({
+          port: bound,
+          close: () => new Promise<void>((r) => server.close(() => r())),
+        });
       });
-    });
+    };
+    tryListen();
   });
 }

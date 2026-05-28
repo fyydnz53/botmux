@@ -100,13 +100,28 @@ describe('terminal proxy — HTTP', () => {
     expect(res.status).toBe(404);
   });
 
-  it('rejects when the port is already in use (EADDRINUSE)', async () => {
+  it('auto-increments to the next free port when the preferred port is taken', async () => {
+    const blocker = createServer();
+    await new Promise<void>(r => blocker.listen(0, '127.0.0.1', () => r()));
+    const taken = (blocker.address() as { port: number }).port;
+    try {
+      const workerPort = await startFakeWorker();
+      proxy = await startTerminalProxy({ port: taken, host: '127.0.0.1', resolvePort: () => workerPort });
+      expect(proxy.port).toBeGreaterThan(taken);
+      const res = await fetch(`http://127.0.0.1:${proxy.port}/s/sess1/`);
+      expect(res.status).toBe(200);
+    } finally {
+      await new Promise<void>(r => blocker.close(() => r()));
+    }
+  });
+
+  it('rejects when probing is disabled and the port is taken (maxProbe: 0)', async () => {
     const blocker = createServer();
     await new Promise<void>(r => blocker.listen(0, '127.0.0.1', () => r()));
     const taken = (blocker.address() as { port: number }).port;
     try {
       await expect(
-        startTerminalProxy({ port: taken, host: '127.0.0.1', resolvePort: () => undefined }),
+        startTerminalProxy({ port: taken, host: '127.0.0.1', maxProbe: 0, resolvePort: () => undefined }),
       ).rejects.toThrow();
     } finally {
       await new Promise<void>(r => blocker.close(() => r()));
