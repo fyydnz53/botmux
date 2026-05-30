@@ -4,6 +4,7 @@
  *
  * Usage:
  *   botmux setup          — interactive first-time configuration
+ *   botmux setup --no-open-platform-auto — skip Feishu Open Platform automation
  *   botmux start          — start daemon (pm2)
  *   botmux stop           — stop daemon
  *   botmux restart        — restart daemon (auto-restores sessions)
@@ -286,7 +287,22 @@ function hasConfig(): boolean {
 }
 
 function ask(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
-  return new Promise(resolve => rl.question(question, resolve));
+  return new Promise((resolve, reject) => {
+    const onError = (err: NodeJS.ErrnoException) => {
+      rl.off("error", onError);
+      if (err?.code === "EIO") {
+        console.warn("\nWarning: interactive input stream closed (EIO); continuing with empty input.");
+        resolve("");
+        return;
+      }
+      reject(err);
+    };
+    rl.once("error", onError);
+    rl.question(question, answer => {
+      rl.off("error", onError);
+      resolve(answer);
+    });
+  });
 }
 
 // ─── Setup helpers ──────────────────────────────────────────────────────────
@@ -457,6 +473,43 @@ function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {
 
   console.log('  完成后 `botmux start` (或 `botmux restart`)，启动检查不会卡住，');
   console.log('  缺权限只 WARN，去开放平台补齐后 daemon 自动恢复。\n');
+}
+
+async function finishOpenPlatformSetup(appId: string, brand: 'feishu' | 'lark'): Promise<void> {
+  const { parseSetupOpenPlatformAutoFlag, automateOpenPlatformSetup } = await import('./setup/open-platform-automation.js');
+  if (!parseSetupOpenPlatformAutoFlag(process.argv.slice(3))) {
+    console.log('\n已跳过开放平台自动配置 (--no-open-platform-auto)。');
+    printRemainingSteps(appId, brand);
+    return;
+  }
+
+  console.log('\n── 开放平台自动配置 ──\n');
+  console.log('将使用 botmux 内置 Feishu Web QR 登录获取/复用 Web session，自动导入权限、配置 redirect URL 并创建/发布版本。');
+  console.log('如失败会自动回退到手动步骤提示，不影响已写入的 botmux 配置。\n');
+
+  const result = await automateOpenPlatformSetup({ appId, brand });
+  if (result.ok) {
+    console.log('✅ 开放平台自动配置完成');
+    console.log(`   Session 来源: ${result.sessionSource}`);
+    const skipped = result.skippedScopeCount ?? 0;
+    console.log(`   已导入权限数: ${result.scopeCount}${skipped > 0 ? `（另有 ${skipped} 项当前租户目录中没有，已跳过）` : ''}`);
+    if (result.scopeWarning) {
+      console.log(`   ⚠️ 权限注册未全部成功（部分租户对个别权限有限制）：${result.scopeWarning}`);
+      console.log('      可稍后到开放平台「权限管理」手动补齐缺失权限。');
+    } else if (result.scopeCount === 0) {
+      console.log('   ⚠️ 本次没有成功导入任何权限，请到开放平台「权限管理」手动导入 ~/.botmux/lark-scopes.json。');
+    }
+    console.log(`   已配置 redirect URL: http://127.0.0.1:9768/callback`);
+    if (result.versionId) console.log(`   已提交发布版本: ${result.versionId}`);
+    else console.log('   已创建版本；未从响应中解析到 versionId，请到开放平台确认是否需要手动发布。');
+    console.log('');
+    return;
+  }
+
+  console.log(`⚠️  开放平台自动配置失败 (${result.reason}): ${result.message}`);
+  if (result.sessionFile) console.log(`   botmux session 文件: ${result.sessionFile}`);
+  console.log('   请按下面的手动步骤继续完成开放平台配置。');
+  printRemainingSteps(appId, brand);
 }
 
 /**
@@ -818,7 +871,7 @@ async function writeSingleBotConfig(): Promise<boolean> {
 
   writeBotsJsonAtomic([bot]);
   console.log(`\n✅ 配置已写入: ${BOTS_JSON_FILE}`);
-  printRemainingSteps(bot.larkAppId, botBrand(bot));
+  await finishOpenPlatformSetup(bot.larkAppId, botBrand(bot));
   console.log(`下一步:`);
   console.log(`  1. botmux start              启动 daemon`);
   console.log(`  2. botmux autostart enable   注册开机自启（推荐：${process.platform === 'darwin' ? 'mac launchd' : process.platform === 'linux' ? 'linux user systemd' : '当前平台暂不支持'}，无需 sudo）`);
@@ -862,7 +915,7 @@ async function cmdSetup(): Promise<void> {
       console.log(`旧配置已备份: ${BOTS_JSON_FILE}.bak`);
       writeBotsJsonAtomic([newBot]);
       console.log(`✅ 配置已写入: ${BOTS_JSON_FILE}`);
-      printRemainingSteps(newBot.larkAppId, botBrand(newBot));
+      await finishOpenPlatformSetup(newBot.larkAppId, botBrand(newBot));
       console.log(`下一步: botmux restart\n`);
       return;
     }
@@ -920,7 +973,7 @@ async function cmdSetup(): Promise<void> {
       // appId 切换 = 换了一个飞书应用, 新 appId 大概率需要重新申请权限 + 配重定向 URL.
       // 把 printRemainingSteps 的深链端给用户, 比 README 警告里那句"历史数据不迁移"更可操作.
       if (appIdChanged) {
-        printRemainingSteps(edited.larkAppId, botBrand(edited));
+        await finishOpenPlatformSetup(edited.larkAppId, botBrand(edited));
       }
       console.log(`下一步: botmux restart\n`);
       return;
@@ -963,7 +1016,7 @@ async function cmdSetup(): Promise<void> {
     writeBotsJsonAtomic([...bots, newBot]);
     console.log(`\n✅ 已添加机器人 ${newBot.larkAppId}，共 ${bots.length + 1} 个`);
     console.log(`   配置文件: ${BOTS_JSON_FILE}`);
-    printRemainingSteps(newBot.larkAppId, botBrand(newBot));
+    await finishOpenPlatformSetup(newBot.larkAppId, botBrand(newBot));
     console.log(`下一步: botmux restart\n`);
 
   } else if (hasEnv) {
@@ -1005,7 +1058,7 @@ async function cmdSetup(): Promise<void> {
     console.log(`\n✅ 已迁移到多机器人配置`);
     console.log(`   配置文件: ${BOTS_JSON_FILE}`);
     console.log(`   旧配置已备份: ${ENV_FILE}.bak`);
-    printRemainingSteps(newBot.larkAppId, botBrand(newBot));
+    await finishOpenPlatformSetup(newBot.larkAppId, botBrand(newBot));
     console.log(`下一步: botmux restart\n`);
 
   } else {
@@ -2200,6 +2253,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
 
 命令:
   setup       交互式配置（首次使用 / 添加机器人）
+              默认使用 botmux 内置 Feishu Web QR 登录尝试自动导入权限/redirect/发布版本；可加 --no-open-platform-auto 跳过
   start       启动 daemon
   stop        停止 daemon
   restart     重启 daemon（自动恢复活跃会话）
