@@ -2288,6 +2288,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
         const now = Date.now();
         session.larkAppId = larkAppId;
         session.ownerOpenId = threadSenderOpenId;
+        session.creatorOpenId = threadSenderOpenId;  // stable creator (= dispatch orchestrator for /repo prime) — see Session.creatorOpenId
         session.ownerUnionId = data?.sender?.sender_id?.union_id;
         session.lastCallerOpenId = threadSenderOpenId;
         session.lastMessageAt = new Date(now).toISOString();
@@ -2435,6 +2436,10 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     const ownerUnionId = isForeignBot ? undefined : senderUId;
     session.larkAppId = larkAppId;
     session.ownerOpenId = ownerOpenId;
+    // creatorOpenId is the raw creating sender — set even for foreign-bot
+    // sessions (unlike ownerOpenId, nulled above) so `botmux report` can find the
+    // dispatch orchestrator on a no-`/repo` kickoff auto-create. See Session.creatorOpenId.
+    session.creatorOpenId = senderOId;
     session.ownerUnionId = ownerUnionId;
     session.lastCallerOpenId = senderOId;
     session.quoteTargetId = parsed.messageId;

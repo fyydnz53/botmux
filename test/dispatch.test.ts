@@ -16,6 +16,7 @@ import {
   buildRepoPrimeText,
   buildReportContent,
   findSubBotTopic,
+  eligibleAutoMentionAliases,
 } from '../src/core/dispatch.js';
 
 describe('parseDispatchBotSpec', () => {
@@ -179,5 +180,32 @@ describe('findSubBotTopic', () => {
   it('does not fire across a different chat', () => {
     // ou_coder is also in seedC, but that topic is in oc_else, not oc_main
     expect(findSubBotTopic({ mentionOpenId: 'ou_coder', chatId: 'oc_zzz', registry, activeSeeds })).toBeNull();
+  });
+});
+
+describe('eligibleAutoMentionAliases', () => {
+  const selfAliases = new Set<string>(['claude', 'claude-code']);
+  const convo = new Set<string>(['cli_reviewer_in_topic']);
+
+  it('always includes the unique botName (supports first-time @-invite)', () => {
+    const r = eligibleAutoMentionAliases({ botName: 'CoCo', cliId: 'coco', larkAppId: 'cli_not_in_convo', selfAliases, convoBotAppIds: convo });
+    expect(r).toContain('CoCo');
+  });
+
+  it('includes the type-generic cliId ONLY when the bot is in the conversation', () => {
+    const inTopic = eligibleAutoMentionAliases({ botName: 'Codex分身', cliId: 'codex', larkAppId: 'cli_reviewer_in_topic', selfAliases, convoBotAppIds: convo });
+    expect(inTopic).toEqual(['Codex分身', 'codex']);
+  });
+
+  it('THE FIX: drops the cliId alias for a same-type bot NOT in the conversation (no fan-out)', () => {
+    const elsewhere = eligibleAutoMentionAliases({ botName: 'Codex二号分身', cliId: 'codex', larkAppId: 'cli_other_codex', selfAliases, convoBotAppIds: convo });
+    // botName still allowed (unique), but the shared "codex" cliId is NOT — so
+    // "@Codex" (matching cliId) won't pull this off-topic codex bot in.
+    expect(elsewhere).toEqual(['Codex二号分身']);
+  });
+
+  it('excludes self aliases entirely', () => {
+    const r = eligibleAutoMentionAliases({ botName: 'Claude', cliId: 'claude-code', larkAppId: 'cli_reviewer_in_topic', selfAliases, convoBotAppIds: convo });
+    expect(r).toEqual([]);
   });
 });

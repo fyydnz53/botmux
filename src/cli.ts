@@ -26,7 +26,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
-import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, findSubBotTopic } from './core/dispatch.js';
+import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, findSubBotTopic, eligibleAutoMentionAliases } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
@@ -1463,6 +1463,7 @@ interface SessionData {
   webPort?: number;
   larkAppId?: string;
   ownerOpenId?: string;
+  creatorOpenId?: string;
   lastCallerOpenId?: string;
   /** Chat-scope quote chain — see Session.quoteTargetId in types.ts. */
   quoteTargetId?: string;
@@ -2799,7 +2800,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     if (!existsSync(contentFile)) { console.error(`文件不存在: ${contentFile}`); process.exit(1); }
     content = readFileSync(contentFile, 'utf-8');
   } else {
-    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention']);
+    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention', '--anyway']);
     if (pos.length > 0) {
       content = pos.join(' ');
     } else {
@@ -2999,10 +3000,28 @@ async function cmdSend(rest: string[]): Promise<void> {
           .filter((name): name is string => !!name)
           .map(name => name.toLowerCase()),
       );
+      // Bots actively in THIS conversation (thread root for thread-scope, chat for
+      // chat-scope). Used to gate the type-generic `cliId` alias so prose "@codex"
+      // resolves to the codex bot collaborating HERE, not every same-type bot
+      // (the fan-out that pulled all Codex-named bots into a topic). See
+      // eligibleAutoMentionAliases.
+      const convoBotAppIds = new Set<string>();
+      for (const sess of loadSessions().values()) {
+        if (sess.status !== 'active' || !sess.larkAppId) continue;
+        const here = isChatScope
+          ? sess.chatId === s.chatId
+          : (!!s.rootMessageId && sess.rootMessageId === s.rootMessageId);
+        if (here) convoBotAppIds.add(sess.larkAppId);
+      }
       for (const entry of sortedEntries) {
         if (!entry.botName || entry.larkAppId === appId) continue;
-        const names = [entry.botName, entry.cliId]
-          .filter((name): name is string => !!name && !selfAliases.has(name.toLowerCase()));
+        const names = eligibleAutoMentionAliases({
+          botName: entry.botName,
+          cliId: entry.cliId ?? undefined,
+          larkAppId: entry.larkAppId ?? undefined,
+          selfAliases,
+          convoBotAppIds,
+        });
         for (const name of names) {
           const escName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           // Boundary: lookbehind blocks only ASCII word chars (so `user@Claude`
@@ -3484,13 +3503,15 @@ async function cmdReport(rest: string[]): Promise<void> {
   let reg: Record<string, any> = {};
   try { if (existsSync(regPath)) reg = JSON.parse(readFileSync(regPath, 'utf-8')); } catch { /* */ }
   const entry = s.rootMessageId ? reg[s.rootMessageId] : undefined;
-  // The orchestrator's open_id (sub-bot-app-scoped) is `ownerOpenId` — captured
-  // once when `botmux dispatch`'s @ created this session. NOT
-  // quoteTargetSenderOpenId: that tracks the *last* sender who @-ed this sub-bot,
-  // so in a coder+reviewer topic it drifts to the reviewer (the peer who @-ed the
-  // coder last) and the report would @ the wrong bot — observed live: the coder's
-  // report @-ed Codex instead of the orchestrator, so the orchestrator never woke.
-  const orchOpenId = s.ownerOpenId;
+  // The orchestrator's open_id (sub-bot-app-scoped) is whoever created this
+  // session = the dispatcher. Prefer `creatorOpenId` (set on EVERY creation path,
+  // incl. a no-`/repo` foreign-bot kickoff auto-create where ownerOpenId is
+  // nulled), then `ownerOpenId` (older sessions / `/repo` prime). NEVER
+  // quoteTargetSenderOpenId alone: it tracks the *last* sender who @-ed this
+  // sub-bot, so in a coder+reviewer topic it drifts to the reviewer (observed
+  // live: the coder's report @-ed the reviewer, not the orchestrator). Keep it as
+  // a last-ditch fallback only for pre-existing sessions that predate both fields.
+  const orchOpenId = s.creatorOpenId ?? s.ownerOpenId ?? s.quoteTargetSenderOpenId;
   if (!entry || !orchOpenId) {
     console.error(
       '当前会话不是被 botmux dispatch 派活的子项目会话（缺少主编排坐标）。\n' +

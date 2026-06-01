@@ -192,3 +192,41 @@ export function findSubBotTopic(input: {
   }
   return null;
 }
+
+/**
+ * Decide which names of a candidate bot are eligible for prose `@Name`
+ * auto-mention injection in `botmux send`.
+ *
+ * The fan-out bug: a bot writes "@Codex review" in its message; the injector
+ * matches each bot by **botName OR cliId**, and the cliId ("codex") is a shared
+ * *type* alias — so "@Codex" matches every codex-type bot (Codex分身, Codex二号分身,
+ * ttadk(codex), aiden x codex…) and pulls them ALL into the topic, each spawning
+ * a session and replying.
+ *
+ * Fix: the unique `botName` is always eligible (so first-time @-invites still
+ * work), but the type-generic `cliId` alias is eligible **only when this bot is
+ * actually in the current conversation** (`convoBotAppIds` = bots with an active
+ * session in this thread / chat). So "@Codex" resolves to the one codex bot
+ * collaborating here, not every same-type bot. `selfAliases` (the sender's own
+ * name/cliId) are always excluded.
+ */
+export function eligibleAutoMentionAliases(input: {
+  botName?: string;
+  cliId?: string;
+  larkAppId?: string;
+  selfAliases: Set<string>;
+  convoBotAppIds: Set<string>;
+}): string[] {
+  const out: string[] = [];
+  const { botName, cliId, larkAppId, selfAliases, convoBotAppIds } = input;
+  if (botName && !selfAliases.has(botName.toLowerCase())) out.push(botName);
+  if (
+    cliId &&
+    !selfAliases.has(cliId.toLowerCase()) &&
+    !!larkAppId &&
+    convoBotAppIds.has(larkAppId)
+  ) {
+    out.push(cliId);
+  }
+  return out;
+}
