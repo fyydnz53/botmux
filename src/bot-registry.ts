@@ -531,7 +531,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         if (typeof (rawVoice as any).speaker === 'string') v.speaker = (rawVoice as any).speaker;
         if (typeof (rawVoice as any).rate === 'number') v.rate = (rawVoice as any).rate;
         const s = (rawVoice as any).sami;
-        if (s && typeof s === 'object') v.sami = { accessKey: s.accessKey, secretKey: s.secretKey, appkey: s.appkey };
+        if (s && typeof s === 'object') v.sami = { accessKey: s.accessKey, secretKey: s.secretKey, appkey: s.appkey, tokenUrl: s.tokenUrl, wsUrl: s.wsUrl };
         const o = (rawVoice as any).openai;
         if (o && typeof o === 'object') v.openai = { baseUrl: o.baseUrl, apiKey: o.apiKey, model: o.model };
         if (v.engine || v.sami || v.openai || v.speaker) voice = v;

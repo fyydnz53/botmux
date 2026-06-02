@@ -9,6 +9,10 @@ export interface VoiceSamiCreds {
   accessKey?: string;
   secretKey?: string;
   appkey?: string;
+  /** SAMI is internal; its endpoints are NOT hardcoded in this public repo.
+   *  Supply here (or via SAMI_TOKEN_URL / SAMI_WS_URL env). */
+  tokenUrl?: string;
+  wsUrl?: string;
 }
 
 export interface VoiceOpenAIConfig {
