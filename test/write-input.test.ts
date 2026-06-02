@@ -50,25 +50,27 @@ import type { CliAdapter, PtyHandle } from '../src/adapters/cli/types.js';
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { dirname, join } from 'node:path';
+import { codexHistoryPath } from '../src/services/codex-paths.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const CODEX_HISTORY_PATH = join(homedir(), '.codex', 'history.jsonl');
 const COCO_HISTORY_PATH = platform() === 'darwin'
   ? join(homedir(), 'Library', 'Caches', 'coco', 'history.jsonl')
   : join(homedir(), '.cache', 'coco', 'history.jsonl');
 const CLAUDE_KEYBINDINGS_PATH = join(homedir(), '.claude', 'keybindings.json');
 
 function appendCodexHistory(content: string, sessionId?: string): void {
-  mkdirSync(dirname(CODEX_HISTORY_PATH), { recursive: true });
-  appendFileSync(CODEX_HISTORY_PATH, JSON.stringify({ session_id: sessionId, text: content }) + '\n');
+  const path = codexHistoryPath();
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, JSON.stringify({ session_id: sessionId, text: content }) + '\n');
 }
 
 function resetCodexHistory(): void {
-  mkdirSync(dirname(CODEX_HISTORY_PATH), { recursive: true });
-  writeFileSync(CODEX_HISTORY_PATH, '');
+  const path = codexHistoryPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, '');
 }
 
 function appendCocoHistory(content: string): void {
@@ -915,6 +917,32 @@ describe('codex writeInput submission confirmation', () => {
     ]);
   });
 
+  it('honors CODEX_HOME for resume fallback and submit confirmation', async () => {
+    const prevCodexHome = process.env.CODEX_HOME;
+    const customHome = join(homedir(), '.codex-botmux-test-home');
+    process.env.CODEX_HOME = customHome;
+    try {
+      resetCodexHistory();
+      appendCodexHistory('<session_id>custom-botmux-session</session_id>', 'custom-codex-session');
+      const adapter = createCodexAdapter('/bin/codex');
+      expect(adapter.buildArgs({ sessionId: 'custom-botmux-session', resume: true })).toEqual([
+        'resume',
+        '--dangerously-bypass-approvals-and-sandbox',
+        '--no-alt-screen',
+        'custom-codex-session',
+      ]);
+
+      resetCodexHistory();
+      const pty = makeTmuxPty({ codexSessionId: 'custom-submit-session' });
+      const result = await adapter.writeInput(pty, MULTILINE);
+      expect(result).toEqual({ submitted: true, cliSessionId: 'custom-submit-session' });
+    } finally {
+      if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prevCodexHome;
+      try { rmSync(customHome, { recursive: true, force: true }); } catch { /* memfs / absent */ }
+    }
+  });
+
   it('buildArgs starts fresh when resume has no known Codex thread id', () => {
     resetCodexHistory();
     const adapter = createCodexAdapter('/bin/codex');
@@ -963,6 +991,66 @@ describe('codex writeInput submission confirmation', () => {
     expect(result).toEqual({ submitted: true, cliSessionId: 'codex-thread-1' });
   });
 
+  it('ignores same-prefix history decoys and returns the exact submitted thread id', async () => {
+    resetCodexHistory();
+    const content = 'shared-prefix '.repeat(4) + 'actual submitted tail';
+    const decoy = content.slice(0, 40) + ' different tail from another codex';
+    let submittedText = '';
+    const pty: PtyHandle = {
+      write: vi.fn(),
+      pasteText: vi.fn((text: string) => { submittedText = text; }),
+      sendSpecialKeys: vi.fn((key: string) => {
+        if (key !== 'Enter') return;
+        appendCodexHistory(decoy, 'decoy-thread');
+        appendCodexHistory(submittedText, 'actual-thread');
+      }),
+    };
+    const adapter = createCodexAdapter('/bin/codex');
+    const result = await adapter.writeInput(pty, content);
+
+    expect(result).toEqual({ submitted: true, cliSessionId: 'actual-thread' });
+  });
+
+  it('matches JSON-decoded escaped text from history.jsonl', async () => {
+    resetCodexHistory();
+    const content = '<user_message>\n包含 <tag> & emoji ✅\n</user_message>';
+    let submittedText = '';
+    const pty: PtyHandle = {
+      write: vi.fn(),
+      pasteText: vi.fn((text: string) => { submittedText = text; }),
+      sendSpecialKeys: vi.fn((key: string) => {
+        if (key !== 'Enter') return;
+        const escaped = submittedText
+          .replace(/</g, '\\u003c')
+          .replace(/>/g, '\\u003e')
+          .replace(/&/g, '\\u0026');
+        appendFileSync(codexHistoryPath(), `{"session_id":"escaped-thread","text":"${escaped.replace(/\n/g, '\\n')}"}` + '\n');
+      }),
+    };
+    const adapter = createCodexAdapter('/bin/codex');
+    const result = await adapter.writeInput(pty, content);
+
+    expect(result).toEqual({ submitted: true, cliSessionId: 'escaped-thread' });
+  });
+
+  it('matches history text after CRLF normalization without falling back to prefix-only', async () => {
+    resetCodexHistory();
+    const content = 'first line\r\nsecond line\r\nthird line';
+    let submittedText = '';
+    const pty: PtyHandle = {
+      write: vi.fn(),
+      pasteText: vi.fn((text: string) => { submittedText = text; }),
+      sendSpecialKeys: vi.fn((key: string) => {
+        if (key !== 'Enter') return;
+        appendCodexHistory(submittedText.replace(/\r\n/g, '\n'), 'normalised-thread');
+      }),
+    };
+    const adapter = createCodexAdapter('/bin/codex');
+    const result = await adapter.writeInput(pty, content);
+
+    expect(result).toEqual({ submitted: true, cliSessionId: 'normalised-thread' });
+  });
+
   it('retries Enter and reports failure when history.jsonl never records the prompt', async () => {
     resetCodexHistory();
     const pty = makeTmuxPty({ confirmCodexSubmit: false });
@@ -975,6 +1063,8 @@ describe('codex writeInput submission confirmation', () => {
     // before any append it must report the submit still missing.
     expect(typeof (result as any)?.recheck).toBe('function');
     expect((result as any).recheck()).toBe(false);
+    appendCodexHistory(MULTILINE, 'late-codex-thread');
+    expect((result as any).recheck()).toEqual({ submitted: true, cliSessionId: 'late-codex-thread' });
     expect(pty.pasteText).toHaveBeenCalledWith(MULTILINE);
     expect(pty.sendText).not.toHaveBeenCalled();
     expect(pty.sendSpecialKeys).toHaveBeenCalledTimes(4);

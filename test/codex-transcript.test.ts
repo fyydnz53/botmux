@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, appendFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync, statSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { drainCodexRollout, codexSessionIdFromRolloutPath, splitCodexEventsByCutoff, extractLastCodexTurn, type CodexBridgeEvent } from '../src/services/codex-transcript.js';
+import { drainCodexRollout, codexSessionIdFromRolloutPath, findCodexRolloutBySessionId, splitCodexEventsByCutoff, extractLastCodexTurn, type CodexBridgeEvent } from '../src/services/codex-transcript.js';
 
 let dir: string;
 let path: string;
@@ -60,6 +60,26 @@ describe('codexSessionIdFromRolloutPath', () => {
   it('returns undefined when filename is malformed', () => {
     expect(codexSessionIdFromRolloutPath('/root/.codex/sessions/foo/bar.jsonl')).toBeUndefined();
     expect(codexSessionIdFromRolloutPath('rollout-no-suffix-just-text.jsonl')).toBeUndefined();
+  });
+});
+
+describe('findCodexRolloutBySessionId', () => {
+  it('honors CODEX_HOME when locating rollout transcripts', () => {
+    const prevCodexHome = process.env.CODEX_HOME;
+    const codexHome = mkdtempSync(join(tmpdir(), 'codex-home-'));
+    const sid = '019dd80d-d922-7a11-8339-0208d8c5b4ec';
+    const rolloutDir = join(codexHome, 'sessions', '2026', '06', '02');
+    const rolloutPath = join(rolloutDir, `rollout-2026-06-02T08-14-07-${sid}.jsonl`);
+    process.env.CODEX_HOME = codexHome;
+    try {
+      mkdirSync(rolloutDir, { recursive: true });
+      writeFileSync(rolloutPath, '');
+      expect(findCodexRolloutBySessionId(sid)).toBe(rolloutPath);
+    } finally {
+      if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prevCodexHome;
+      rmSync(codexHome, { recursive: true, force: true });
+    }
   });
 });
 

@@ -26,10 +26,10 @@
  */
 import { existsSync, statSync, openSync, readSync, closeSync, readdirSync, readlinkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { homedir, platform } from 'node:os';
+import { platform } from 'node:os';
 import { join } from 'node:path';
+import { codexSessionsRoot } from './codex-paths.js';
 
-const CODEX_SESSIONS_ROOT = join(homedir(), '.codex', 'sessions');
 const IS_LINUX = platform() === 'linux';
 
 /** Extract the cliSessionId encoded in a rollout filename. Codex's session
@@ -180,9 +180,10 @@ export interface CodexDrainResult {
  *  directory tree is small (year/month/day) — a one-shot recursive scan
  *  is cheap enough that we don't bother caching. */
 export function findCodexRolloutBySessionId(cliSessionId: string): string | undefined {
-  if (!cliSessionId || !existsSync(CODEX_SESSIONS_ROOT)) return undefined;
+  const sessionsRoot = codexSessionsRoot();
+  if (!cliSessionId || !existsSync(sessionsRoot)) return undefined;
   const suffix = `-${cliSessionId}.jsonl`;
-  const stack: string[] = [CODEX_SESSIONS_ROOT];
+  const stack: string[] = [sessionsRoot];
   while (stack.length > 0) {
     const dir = stack.pop()!;
     let entries: string[];

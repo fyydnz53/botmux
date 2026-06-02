@@ -1,16 +1,13 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { resolveCommand } from './registry.js';
 import { BOTMUX_SHELL_HINTS } from './shared-hints.js';
 import type { CliAdapter, PtyHandle } from './types.js';
+import { codexHistoryPath } from '../../services/codex-paths.js';
 
 /** Global submit log — Codex appends one JSON line here on every successful
  *  user submit across all sessions. Far better than the per-session rollout
  *  file, which Codex creates lazily at the first submit (chicken-and-egg:
  *  you can't use it to verify the *first* submit that we're trying to fix). */
-const HISTORY_PATH = join(homedir(), '.codex', 'history.jsonl');
-
 function delay(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
@@ -25,7 +22,21 @@ interface HistoryMatch {
   cliSessionId?: string;
 }
 
-function matchHistoryDelta(path: string, fromByte: number, marker: string): HistoryMatch {
+function readCliSessionId(parsed: unknown): string | undefined {
+  return parsed && typeof parsed === 'object' && typeof (parsed as any).session_id === 'string'
+    ? (parsed as any).session_id
+    : undefined;
+}
+
+function normaliseHistoryText(text: string): string {
+  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function historyTextMatches(actual: string, expected: string): boolean {
+  return actual === expected || normaliseHistoryText(actual) === normaliseHistoryText(expected);
+}
+
+function matchHistoryDelta(path: string, fromByte: number, expectedText: string): HistoryMatch {
   if (!existsSync(path)) return { found: false };
   let size: number;
   try { size = statSync(path).size; } catch { return { found: false }; }
@@ -39,47 +50,47 @@ function matchHistoryDelta(path: string, fromByte: number, marker: string): Hist
     closeSync(fd);
   }
   const delta = buf.toString('utf8');
-  for (const line of delta.split('\n')) {
-    if (!line.includes(marker)) continue;
+  const lines = delta.endsWith('\n') ? delta.split('\n') : delta.split('\n').slice(0, -1);
+  for (const line of lines) {
     try {
       const parsed = JSON.parse(line);
-      return {
-        found: true,
-        cliSessionId: typeof parsed.session_id === 'string' ? parsed.session_id : undefined,
-      };
+      if (typeof parsed?.text === 'string' && historyTextMatches(parsed.text, expectedText)) {
+        return { found: true, cliSessionId: readCliSessionId(parsed) };
+      }
     } catch {
-      return { found: true };
+      // Ignore partial/non-JSON lines. A later poll will see the completed
+      // history entry if Codex was still writing it.
     }
   }
   return { found: false };
 }
 
 async function waitForHistoryAppend(
-  path: string, fromByte: number, marker: string, timeoutMs: number,
+  path: string, fromByte: number, expectedText: string, timeoutMs: number,
 ): Promise<HistoryMatch> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const match = matchHistoryDelta(path, fromByte, marker);
+    const match = matchHistoryDelta(path, fromByte, expectedText);
     if (match.found) return match;
     await delay(100);
   }
   return { found: false };
 }
 
-/** Build a JSON-escaped prefix of the content so substring-match against the
- *  raw history.jsonl file content (where text fields store \n as the two-char
- *  escape `\n`, not a literal newline) finds our line. The prefix length is
- *  chosen to be unique-enough even when two bots submit near-identical text. */
+/** Build a JSON-escaped prefix for a cheap raw-line prefilter before parsing
+ *  history.jsonl. The final match is exact against the decoded `text` field;
+ *  the prefix only avoids JSON-parsing unrelated lines from other sessions. */
 function historyMarker(content: string): string {
   const prefix = content.slice(0, 40);
   return JSON.stringify(prefix).slice(1, -1);  // strip surrounding quotes
 }
 
 function latestCodexSessionForBotmuxSession(botmuxSessionId: string): string | undefined {
-  if (!existsSync(HISTORY_PATH)) return undefined;
+  const historyPath = codexHistoryPath();
+  if (!existsSync(historyPath)) return undefined;
   try {
-    const size = statSync(HISTORY_PATH).size;
-    const fd = openSync(HISTORY_PATH, 'r');
+    const size = statSync(historyPath).size;
+    const fd = openSync(historyPath, 'r');
     const buf = Buffer.alloc(size);
     try {
       readSync(fd, buf, 0, size, 0);
@@ -93,7 +104,10 @@ function latestCodexSessionForBotmuxSession(botmuxSessionId: string): string | u
       if (!line.includes(marker)) continue;
       try {
         const parsed = JSON.parse(line);
-        if (typeof parsed.session_id === 'string') return parsed.session_id;
+        if (typeof parsed?.text === 'string' && parsed.text.includes(botmuxSessionId)) {
+          const sid = readCliSessionId(parsed);
+          if (sid) return sid;
+        }
       } catch {
         continue;
       }
@@ -172,8 +186,8 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
         }
       };
 
-      const baseByte = currentFileSize(HISTORY_PATH);
-      const marker = historyMarker(content);
+      const historyPath = codexHistoryPath();
+      const baseByte = currentFileSize(historyPath);
 
       try {
         if (pty.pasteText) {
@@ -192,7 +206,7 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
       if (!trySendEnter()) return { submitted: false };
 
       for (let attempt = 0; attempt < 3; attempt++) {
-        const match = await waitForHistoryAppend(HISTORY_PATH, baseByte, marker, 800);
+        const match = await waitForHistoryAppend(historyPath, baseByte, content, 800);
         if (match.found) {
           return match.cliSessionId
             ? { submitted: true, cliSessionId: match.cliSessionId }
@@ -200,7 +214,7 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
         }
         if (!trySendEnter()) return { submitted: false };
       }
-      const match = await waitForHistoryAppend(HISTORY_PATH, baseByte, marker, 800);
+      const match = await waitForHistoryAppend(historyPath, baseByte, content, 800);
       if (match.found) {
         return match.cliSessionId
           ? { submitted: true, cliSessionId: match.cliSessionId }
@@ -210,7 +224,12 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
       // slow-startup Codex (or one whose first turn is delayed by a heavy
       // initial prompt) may still append our marker after the retries gave
       // up, and the worker re-scans on a delay before warning the user.
-      const recheck = (): boolean => matchHistoryDelta(HISTORY_PATH, baseByte, marker).found;
+      const recheck = () => {
+        const late = matchHistoryDelta(historyPath, baseByte, content);
+        return late.found
+          ? { submitted: true, cliSessionId: late.cliSessionId }
+          : false;
+      };
       return { submitted: false, recheck };
     },
 

@@ -51,7 +51,7 @@ import {
 import { createCliAdapterSync } from './adapters/cli/registry.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
-import type { CliAdapter, PtyHandle } from './adapters/cli/types.js';
+import type { CliAdapter, PtyHandle, SubmitRecheckResult } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { TmuxPipeBackend } from './adapters/backend/tmux-pipe-backend.js';
@@ -2430,7 +2430,7 @@ const SUBMIT_DEFERRED_RECHECK_MS = 20_000;
  *  this whole patch series is fixing. */
 function scheduleSubmitFailureNotify(
   msg: string,
-  recheck: (() => boolean | Promise<boolean>) | undefined,
+  recheck: (() => SubmitRecheckResult | Promise<SubmitRecheckResult>) | undefined,
   transcriptLabel: string,
   bridgeTurnId?: string,
   failureReason?: string,
@@ -2458,7 +2458,18 @@ function scheduleSubmitFailureNotify(
   setTimeout(async () => {
     if (recheck) {
       try {
-        if (await recheck()) {
+        const recheckResult = await recheck();
+        const recheckSubmitted = typeof recheckResult === 'boolean'
+          ? recheckResult
+          : recheckResult.submitted === true;
+        if (recheckSubmitted) {
+          const cliSessionId = typeof recheckResult === 'object' && recheckResult && typeof recheckResult.cliSessionId === 'string'
+            ? recheckResult.cliSessionId
+            : undefined;
+          if (cliSessionId) {
+            persistCliSessionId(cliSessionId);
+            if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cliSessionId);
+          }
           log(`Deferred recheck found submit in ${transcriptLabel} — suppressing warning. preview="${preview}"`);
           return;
         }

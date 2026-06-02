@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 import * as sessionStore from '../services/session-store.js';
 import { persistStreamCardState } from './session-manager.js';
-import { updateMessage, deleteMessage, sendEphemeralCard, sendEphemeralText, sendUserMessage, addReaction, MessageWithdrawnError } from '../im/lark/client.js';
+import { updateMessage, deleteMessage, sendEphemeralCard, sendUserMessage, addReaction, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildRelayedFrozenCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
 import { clearPendingResponsePatchMarker, markPendingResponsePatchMarkerPatched, writePendingResponsePatchMarker } from '../services/pending-response-transaction-store.js';
@@ -558,8 +558,13 @@ export async function deliverEphemeralOrReply(
 ): Promise<void> {
   if (operatorOpenId && ds.chatType !== 'p2p') {
     try {
-      if (msgType === 'interactive') await sendEphemeralCard(ds.larkAppId, ds.chatId, operatorOpenId, content);
-      else await sendEphemeralText(ds.larkAppId, ds.chatId, operatorOpenId, content);
+      // The ephemeral API is card-only (msg_type=text → 10003), so wrap a plain
+      // confirmation line into a minimal markdown card.
+      const cardJson = msgType === 'interactive' ? content : JSON.stringify({
+        config: { wide_screen_mode: true },
+        elements: [{ tag: 'markdown', content }],
+      });
+      await sendEphemeralCard(ds.larkAppId, ds.chatId, operatorOpenId, cardJson);
       return;
     } catch (err) {
       // Topic groups (18053) / other → not ephemeral-capable here; reply visibly.

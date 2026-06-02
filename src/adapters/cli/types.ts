@@ -19,6 +19,11 @@ export interface PtyHandle {
   cliCwd?: string;
 }
 
+export type SubmitRecheckResult = boolean | {
+  submitted: boolean;
+  cliSessionId?: string;
+};
+
 export interface CliAdapter {
   /** Unique identifier */
   readonly id: string;
@@ -99,7 +104,7 @@ export interface CliAdapter {
      *  without waiting for transcript confirmation (for example an unsupported
      *  terminal keybinding). Worker surfaces this immediately. */
     failureReason?: string;
-    recheck?: () => boolean | Promise<boolean>;
+    recheck?: () => SubmitRecheckResult | Promise<SubmitRecheckResult>;
   }>;
 
   /** Optional: absolute path (with ~ expansion handled by caller) to the CLI's
