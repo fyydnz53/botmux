@@ -17,7 +17,7 @@
  *   botmux delete all     — close all active sessions
  *   botmux autostart enable|disable|status — manage boot-time autostart (launchd / user systemd)
  */
-import { execSync, spawnSync, spawn } from 'node:child_process';
+import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -1862,6 +1862,34 @@ function tmuxSessionExists(name: string): boolean {
   }
 }
 
+function botmuxTmuxTarget(sessionId: string): string {
+  const name = `bmx-${sessionId.substring(0, 8)}`;
+  const group = process.env.BOTMUX_TMUX_GROUP_SESSION?.trim();
+  return group ? `${group}:${name}` : name;
+}
+
+function botmuxTmuxTargetExists(sessionId: string): boolean {
+  return tmuxSessionExists(botmuxTmuxTarget(sessionId));
+}
+
+function killBotmuxTmuxTarget(sessionId: string): string | undefined {
+  const target = botmuxTmuxTarget(sessionId);
+  const group = process.env.BOTMUX_TMUX_GROUP_SESSION?.trim();
+  try {
+    const args = group ? ['kill-window', '-t', target] : ['kill-session', '-t', target];
+    execFileSync('tmux', args, { stdio: 'ignore', env: tmuxEnv() });
+    return target;
+  } catch {
+    return undefined;
+  }
+}
+
+function tmuxAttachArgsForTarget(target: string): string[] {
+  // tmux accepts `session:window` directly for attach-session and selects that
+  // window inside the shared group session.
+  return ['attach-session', '-t', target];
+}
+
 /** Shorten path for display: replace $HOME with ~. */
 function shortenPath(p: string): string {
   const home = homedir();
@@ -1918,8 +1946,8 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
       const status = (alive ? 'online' : s.pid ? 'stopped' : 'idle').padEnd(cols.status);
       parts.push(title, dir, pid, uptime, status);
 
-      const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
-      const hasTmux = tmuxSessionExists(tmuxName);
+      const tmuxName = botmuxTmuxTarget(s.sessionId);
+      const hasTmux = botmuxTmuxTargetExists(s.sessionId);
       return { session: s, text: parts.join(' │ '), alive, tmuxName, hasTmux };
     });
   }
@@ -2025,7 +2053,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
 
       // Kill tmux session
       if (r.hasTmux) {
-        try { execSync(`tmux kill-session -t '${r.tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() }); } catch { /* */ }
+        killBotmuxTmuxTarget(s.sessionId);
       }
 
       // Mark closed & persist
@@ -2100,7 +2128,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
           return;
         }
         cleanup();
-        spawnSync('tmux', ['attach-session', '-t', selected.tmuxName], {
+        spawnSync('tmux', tmuxAttachArgsForTarget(selected.tmuxName), {
           stdio: 'inherit',
           env: tmuxEnv(),
         });
@@ -2120,7 +2148,7 @@ async function cmdList(): Promise<void> {
   const live: SessionData[] = [];
   for (const s of active) {
     const hasPid = !!(s.pid && isProcessAlive(s.pid));
-    const hasTmux = tmuxSessionExists(`bmx-${s.sessionId.substring(0, 8)}`);
+    const hasTmux = botmuxTmuxTargetExists(s.sessionId);
     if (!hasPid && !hasTmux) {
       pruned.push(s);
     } else {
@@ -2176,7 +2204,7 @@ function cmdDelete(): void {
   } else if (target === 'stopped') {
     toDelete = active.filter(s => {
       const hasPid = !!(s.pid && isProcessAlive(s.pid));
-      const hasTmux = tmuxSessionExists(`bmx-${s.sessionId.substring(0, 8)}`);
+      const hasTmux = botmuxTmuxTargetExists(s.sessionId);
       return !hasPid && !hasTmux;
     });
     if (toDelete.length === 0) {
@@ -2208,11 +2236,8 @@ function cmdDelete(): void {
     }
 
     // Kill associated tmux session if it exists
-    const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
-    try {
-      execSync(`tmux kill-session -t '${tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() });
-      console.log(`  killed tmux ${tmuxName}`);
-    } catch { /* no tmux session */ }
+    const killedTmux = killBotmuxTmuxTarget(s.sessionId);
+    if (killedTmux) console.log(`  killed tmux ${killedTmux}`);
 
     // Mark session as closed
     s.status = 'closed';
