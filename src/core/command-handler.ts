@@ -1821,7 +1821,7 @@ export async function startAdoptSession(
 
   const zellij = isZellijTarget(target);
   const valid = zellij
-    ? validateZellijAdoptTarget(target.zellijSession, target.zellijPaneId, target.cliPid)
+    ? validateZellijAdoptTarget(target.zellijSession, target.zellijPaneId, target.cliPid, target.cliId)
     : validateAdoptTarget(target);
   if (!valid) {
     await sessionReply(sessionAnchorId(ds), t('cmd.adopt.target_exited', undefined, loc));

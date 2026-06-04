@@ -237,11 +237,14 @@ export function discoverAdoptableZellijSessions(filterCliId?: CliId): ZellijAdop
   return results;
 }
 
-/** Re-confirm a zellij pane still runs the expected CLI pid (pre-adopt guard). */
-export function validateZellijAdoptTarget(session: string, paneId: string, expectedPid: number): boolean {
+/** Re-confirm a zellij pane still runs the expected CLI pid (pre-adopt guard).
+ *  `filterCliId` MUST mirror discovery's filter: a generic-named `agent` (Cursor)
+ *  is only recognized as a CLI under the 'cursor' filter, so without it the
+ *  expected pid is never re-identified and a live session looks exited. */
+export function validateZellijAdoptTarget(session: string, paneId: string, expectedPid: number, filterCliId?: CliId): boolean {
   const serverPid = findServerPid(session);
   if (!serverPid) return false;
-  const clis = findAllClisUnder(serverPid, 4);
+  const clis = findAllClisUnder(serverPid, 4, filterCliId);
   if (!clis.some(c => c.pid === expectedPid)) return false;
   // And the pane must still exist.
   return paneDimensions(session, paneId) !== undefined;

@@ -32,6 +32,7 @@ vi.mock('node:os', () => ({
 import { execSync } from 'node:child_process';
 import { readFileSync, readlinkSync, existsSync, readdirSync } from 'node:fs';
 import { discoverAdoptableSessions, validateAdoptTarget } from '../src/core/session-discovery.js';
+import type { CliId } from '../src/adapters/cli/types.js';
 
 const mockExecSync = vi.mocked(execSync);
 const mockReadFileSync = vi.mocked(readFileSync);
@@ -647,11 +648,11 @@ describe('validateAdoptTarget', () => {
   // validateAdoptTarget to take the full AdoptableSession-shaped object so it
   // can route to either tmux or herdr validators. These helpers preserve the
   // original tests' intent while feeding the new shape.
-  const tmuxTarget = (target: string, cliPid: number) => ({
+  const tmuxTarget = (target: string, cliPid: number, cliId: CliId = 'claude-code') => ({
     source: 'tmux' as const,
     tmuxTarget: target,
     cliPid,
-    cliId: 'claude-code' as const,
+    cliId,
     cwd: '/x',
     paneCols: 200,
     paneRows: 50,
@@ -716,7 +717,31 @@ describe('validateAdoptTarget', () => {
       dimsMap: {},
     });
 
-    const result = validateAdoptTarget(tmuxTarget('mysession:0.0', 1002));
+    const result = validateAdoptTarget(tmuxTarget('mysession:0.0', 1002, 'aiden'));
     expect(result).toBe(true);
+  });
+
+  // Regression: a Cursor agent installed under the generic name `agent` is only
+  // recognized when the identifier is filtered to 'cursor'. Discovery passes
+  // that filter, so the session surfaces; validation must pass it too, or the
+  // pre-adopt guard (and every daemon-restart restore) re-identifies nothing and
+  // wrongly reports the live session as exited. See cliIdForComm's `agent` case.
+  it('should validate a generic-agent Cursor target by threading its cliId filter', () => {
+    setupMocks({
+      paneLines: 'cursor:0.0 1000\n',
+      // comm is the launcher's thread name; the real identity is argv[0]=`agent`.
+      commMap: { 1000: 'zsh', 1001: 'MainThread' },
+      childMap: { 1000: [1001] },
+      cmdlineMap: { 1001: ['/home/user/.local/bin/agent', '--model', 'gpt-5.5'] },
+      cwdMap: {},
+      dimsMap: {},
+    });
+
+    // Filtered to 'cursor' (as discovery was) → the agent is re-identified → alive.
+    expect(validateAdoptTarget(tmuxTarget('cursor:0.0', 1001, 'cursor'))).toBe(true);
+    // Without the Cursor filter the generic `agent` is unrecognized — proving the
+    // guard genuinely consults the filter, and that omitting it (the old bug)
+    // would have falsely reported "exited".
+    expect(validateAdoptTarget(tmuxTarget('cursor:0.0', 1001, 'claude-code'))).toBe(false);
   });
 });

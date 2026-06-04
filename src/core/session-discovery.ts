@@ -593,8 +593,13 @@ export function discoverAdoptableSessions(filterCliId?: CliId): AdoptableSession
 /**
  * Re-check that a specific pane still has the expected CLI process running.
  * Used to validate an adopt target right before the actual adoption.
+ *
+ * `filterCliId` MUST mirror the filter discovery used. A Cursor agent installed
+ * under the generic name `agent` is only recognized as a CLI when filtered to
+ * 'cursor' (see cliIdForComm); without the same filter here, discovery surfaces
+ * the session but validation re-identifies nothing and wrongly reports it exited.
  */
-export function validateTmuxAdoptTarget(tmuxTarget: string, expectedPid: number): boolean {
+export function validateTmuxAdoptTarget(tmuxTarget: string, expectedPid: number, filterCliId?: CliId): boolean {
   // Verify the tmux pane still exists and get its shell PID
   let panePid: number;
   try {
@@ -609,7 +614,7 @@ export function validateTmuxAdoptTarget(tmuxTarget: string, expectedPid: number)
   }
 
   // Search the process tree for the expected CLI PID
-  const match = findCliProcess(panePid, 3);
+  const match = findCliProcess(panePid, 3, filterCliId);
   return match !== undefined && match.pid === expectedPid;
 }
 
@@ -633,7 +638,7 @@ export function validateAdoptTargetState(target: AdoptableSession | NonNullable<
     ? target.originalCliPid
     : ('cliPid' in target ? target.cliPid : undefined);
   if (!target.tmuxTarget || !pid) return 'missing';
-  return validateTmuxAdoptTarget(target.tmuxTarget, pid) ? 'alive' : 'missing';
+  return validateTmuxAdoptTarget(target.tmuxTarget, pid, target.cliId) ? 'alive' : 'missing';
 }
 
 // 仅供单测使用 —— 暴露内部 helper，方便覆盖跨平台 (Linux /proc vs macOS ps/lsof/pgrep)

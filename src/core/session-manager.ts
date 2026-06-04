@@ -614,7 +614,7 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     if (session.title?.startsWith('Adopt:') && session.adoptedFrom) {
       const adopted = session.adoptedFrom as NonNullable<DaemonSession['adoptedFrom']>;
       const validation = adopted.zellijPaneId
-        ? (typeof adopted.originalCliPid === 'number' && validateZellijAdoptTarget(adopted.zellijSession ?? '', adopted.zellijPaneId, adopted.originalCliPid) ? 'alive' : 'missing')
+        ? (typeof adopted.originalCliPid === 'number' && validateZellijAdoptTarget(adopted.zellijSession ?? '', adopted.zellijPaneId, adopted.originalCliPid, adopted.cliId) ? 'alive' : 'missing')
         : validateAdoptTargetState(adopted);
       if (validation === 'missing') {
         logger.info(`Closing adopt session ${session.sessionId} (adopted target exited: ${adoptTargetLabel(adopted)})`);
