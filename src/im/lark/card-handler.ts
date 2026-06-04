@@ -231,48 +231,46 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     } catch (err) {
       logger.warn(`grant auto-introduce (observed) failed (grant still applied): ${err}`);
     }
-    // 授权成功后：在原线程 @ 被授权人发通知 + 撤回授权卡（用户要求）。
-    // 这两步失败不回滚授权（已落库），仅记日志，并兜底用 in-place patch 让 owner 看到结果。
+    // 授权成功后：
+    //   1. 先同步返回 callback 响应（in-place patch 成「已授权」终态卡），避免飞书等待
+    //      太久或 deleteMessage 与 callback 响应竞态导致客户端 300000 报错；
+    //   2. 通知卡 + 部分失败告知 + 撤回原卡 走后台 fire-and-forget（不阻塞 callback）。
+    const resultCardBody = JSON.parse(buildGrantResultCard(kind, loc));
     if (cardMessageId) {
-      // 通知是 best-effort（@被授权人）；失败不影响主流程，只记日志。
-      //
-      // reply_in_thread 只在「卡片本身已处于话题里」时才开：
-      //   - 话题群 / 普通群内话题 → 卡片有 thread_id → 线程化回复，落进原话题；
-      //   - 普通群顶层消息       → 卡片无 thread_id → reply_in_thread 会凭空开一个
-      //                            新话题（用户不想要），改为普通回复直接落到群里。
-      // thread_id 是「是否真的在话题里」的权威信号（见 event-dispatcher.decideRouting）。
-      // 探测失败时退回线程化回复，保持话题群下的原有行为。
       let replyInThread = true;
       try {
         const detail = await getMessageDetail(larkAppId, cardMessageId);
         const item = detail?.items?.[0];
-        // 拿不到 message item 视为探测失败（走 catch 退回 true），而不是误判成
-        // 「无 thread_id → 普通回复」——后者会在话题群里破坏原有的线程化行为。
         if (!item) throw new Error('no message item in getMessageDetail response');
         replyInThread = Boolean(item.thread_id);
       } catch (err) {
         logger.debug(`grant notify thread-mode probe failed, defaulting to thread reply: ${err}`);
       }
-      try {
-        await replyMessage(larkAppId, cardMessageId, buildGrantNotifyCard(kind, target, loc, quota), 'interactive', replyInThread);
-      } catch (err) {
-        logger.warn(`grant notify failed (grant still applied): ${err}`);
-      }
-      // 部分授权失败：在原线程明确告知 owner（绝不静默撤卡）。失败 target 的 pending 已清，
-      // owner 据此可重新 /grant 重试。
-      if (failed.length > 0) {
-        const failNames = failed.map(f => idToName.get(f.openId) || f.openId).join('、');
-        await replyMessage(larkAppId, cardMessageId, t('card.grant.partial_failed', { names: failNames }, loc), 'text', replyInThread)
-          .catch(err => logger.warn(`grant partial-failure notice failed: ${err}`));
-      }
-      // 撤回授权卡。deleteMessage 返回 boolean——只有确认撤回成功才不返回 patch；
-      // 否则（SDK 吞错/非 0 code）落到 in-place patch，避免卡片留在原地无终态。
-      const withdrawn = await deleteMessage(larkAppId, cardMessageId);
-      if (withdrawn) return;
-      logger.warn(`grant card withdraw failed (grant still applied); falling back to in-place patch`);
+      // fire-and-forget: 通知卡 + 部分失败文字 + 撤回原卡
+      Promise.resolve()
+        .then(async () => {
+          try {
+            await replyMessage(larkAppId, cardMessageId, buildGrantNotifyCard(kind, target, loc, quota), 'interactive', replyInThread);
+          } catch (err) {
+            logger.warn(`grant notify failed (grant still applied): ${err}`);
+          }
+          if (failed.length > 0) {
+            const failNames = failed.map(f => idToName.get(f.openId) || f.openId).join('、');
+            try {
+              await replyMessage(larkAppId, cardMessageId, t('card.grant.partial_failed', { names: failNames }, loc), 'text', replyInThread);
+            } catch (err) {
+              logger.warn(`grant partial-failure notice failed: ${err}`);
+            }
+          }
+          try {
+            await deleteMessage(larkAppId, cardMessageId);
+          } catch (err) {
+            logger.debug(`grant card withdraw (post-callback) failed: ${err}`);
+          }
+        })
+        .catch(err => logger.error(`grant post-callback background tasks failed: ${err}`));
     }
-    // 兜底（无 card message_id，或撤回失败）：靠 callback 返回 patch 原地更新卡。
-    return JSON.parse(buildGrantResultCard(kind, loc));
+    return resultCardBody;
   }
 
   if (isAskCardAction(value?.action)) {

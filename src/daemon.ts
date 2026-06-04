@@ -13,7 +13,7 @@ import { chatHasAllowedUser, resolveGroupJoinPrompt } from './core/auto-start.js
 import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
-import { autoBindOncallFromDefault } from './services/oncall-store.js';
+import { ensureDefaultOncallBound } from './services/oncall-store.js';
 import * as scheduleStore from './services/schedule-store.js';
 import * as messageQueue from './services/message-queue.js';
 import { parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type MessageResource } from './im/lark/message-parser.js';
@@ -429,7 +429,8 @@ export async function enforceMessageQuotaForCliInput(
 
   let quota;
   try {
-    quota = await consumeQuota(larkAppId, ev.quotaKey);
+    const def = getBot(larkAppId).config.messageQuota?.defaultLimit;
+    quota = await consumeQuota(larkAppId, ev.quotaKey, def);
   } catch (err) {
     logger.warn(`[quota:${larkAppId}] consume failed; dropping message ${messageId.substring(0, 12)}: ${err}`);
     abortCharge(larkAppId, messageId);
@@ -452,10 +453,10 @@ export async function enforceMessageQuotaForCliInput(
   }
   // 扣费成功才定论为 done。
   commitCharge(larkAppId, messageId);
-  if (quota.exhausted) {
-    await revokeQuotaGrant(larkAppId, chatId, senderOpenId, ev);
-    await notifyQuotaExhausted(larkAppId, anchor, senderOpenId, quota.limit);
-  }
+  // exhausted=当前这条刚好用完额度（但依然放行给 AI 处理）。
+  // 不在此时发通知，避免给用户"本条已被拒绝"的错觉；
+  // 也不提前 revoke —— 把 quotaState 的 {limit, used>=limit} 记录保留下来，
+  // 等用户下一条消息进来被 allow=false 拦截时，再发"额度已用完"通知 + 执行 revoke。
   return true;
 }
 
@@ -1751,56 +1752,16 @@ function parseTriggerChatBinding(
  * unless it's already bound (`findOncallChatForAnyBot` upstream) or the user
  * has opted out via tombstone.
  *
- * Returns the binding entry on success, undefined when any precondition
- * fails or the lock-internal authoritative check (in `autoBindOncallFromDefault`)
- * sees a concurrent tombstone / existing binding.
+ * Thin wrapper around the shared `ensureDefaultOncallBound` in oncall-store,
+ * which dispatcher also calls before canTalk to avoid the oncall-first-message
+ * "无权限 → 弹授权卡" bug. Idempotent: repeated calls safe.
  */
 async function maybeAutoBindDefaultOncall(
   larkAppId: string,
   chatId: string,
   chatType: 'group' | 'p2p',
 ): Promise<OncallChat | undefined> {
-  if (chatType !== 'group') return undefined; // oncall is group-only by design
-  const bot = getBot(larkAppId);
-  const def = bot.config.defaultOncall;
-  if (!def?.enabled || !def.workingDir) return undefined;
-
-  // Fast-path tombstone check against the in-memory snapshot — avoids taking
-  // the lock when we already know we'd skip. The AUTHORITATIVE re-check lives
-  // inside autoBindOncallFromDefault under the file lock, so a race with a
-  // concurrent unbind (which writes the tombstone) is still safe.
-  const autobound = bot.config.defaultOncallAutoboundChats ?? [];
-  if (autobound.includes(chatId)) return undefined;
-
-  // Validate workingDir at fire time too — directory might have been
-  // deleted/moved since the dashboard save validated it. Skipping (vs.
-  // crashing) lets the user fix the path without losing other bot config.
-  const resolved = expandHome(def.workingDir);
-  let isDir = false;
-  try { isDir = statSync(resolved).isDirectory(); } catch { /* not a dir */ }
-  if (!isDir) {
-    logger.warn(
-      `[${larkAppId}] defaultOncall workingDir invalid (${resolved}); ` +
-      `skipping auto-bind for chat=${chatId}`,
-    );
-    return undefined;
-  }
-
-  const r = await autoBindOncallFromDefault(larkAppId, chatId, def.workingDir);
-  if (!r.ok) {
-    logger.warn(`[${larkAppId}] defaultOncall auto-bind failed: chat=${chatId} reason=${r.reason}`);
-    return undefined;
-  }
-  if (r.skipped) {
-    // Lock-internal authoritative check disagreed with our fast-path —
-    // tombstone or binding raced in. Fine, just don't surface a binding.
-    logger.info(`[${larkAppId}] defaultOncall auto-bind skipped chat=${chatId} reason=${r.skipped}`);
-    return undefined;
-  }
-  logger.info(
-    `[${larkAppId}] defaultOncall auto-bound chat=${chatId} → ${def.workingDir}`,
-  );
-  return r.entry;
+  return ensureDefaultOncallBound(larkAppId, chatId, chatType);
 }
 
 /**

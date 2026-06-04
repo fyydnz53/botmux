@@ -21,6 +21,7 @@ import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { chatQuotaKey, globalQuotaKey } from '../../services/grant-store.js';
+import { ensureDefaultOncallBound } from '../../services/oncall-store.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -768,7 +769,16 @@ export function evaluateTalk(larkAppId: string, chatId: string | undefined, send
   // 成员关系隐含在"能在该 chat 发言"里 —— 退群者发不了言自动失权，新人进群即生效，无需成员快照。
   const allowedUsers = bot.resolvedAllowedUsers;
   if (senderOpenId && allowedUsers.includes(senderOpenId)) return { allowed: true, reason: 'allowedUser' };
-  if (chatId && findOncallChat(larkAppId, chatId)) return { allowed: true, reason: 'oncall' };
+  // Oncall 群命中：默认不限额；仅当 bot 配了 messageQuota.defaultLimit 时，
+  // 才挂 chat:<chatId>:<openId> 这一 quotaKey（与 chatGrant 同键、同计数器，
+  // 便于 owner 后续 /grant @x N 续杯/重置）。
+  if (chatId && findOncallChat(larkAppId, chatId)) {
+    const def = bot.config.messageQuota?.defaultLimit;
+    if (typeof def === 'number' && Number.isInteger(def) && def > 0 && senderOpenId) {
+      return { allowed: true, reason: 'oncall', quotaKey: chatQuotaKey(chatId, senderOpenId) };
+    }
+    return { allowed: true, reason: 'oncall' };
+  }
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return { allowed: true, reason: 'peer' };
   if (chatId && bot.config.allowedChatGroups?.includes(chatId)) return { allowed: true, reason: 'allowedChatGroup' };
 
@@ -820,7 +830,7 @@ async function maybeSendGrantRequestCard(
   if (isThrottled(larkAppId, chatId, requesterOpenId)) return;
   const name = (message?.mentions ?? []).find((m: any) => m?.id?.open_id === requesterOpenId)?.name
     ?? requesterOpenId;
-  const nonce = openPending(larkAppId, chatId, requesterOpenId);
+  const nonce = openPending(larkAppId, chatId, requesterOpenId, getBot(larkAppId).config.messageQuota?.defaultLimit);
   const card = buildGrantCard(
     { ownerOpenId: owner, targets: [{ openId: requesterOpenId, name: String(name) }], chatId, nonce, mode: 'request' },
     localeForBot(larkAppId),
@@ -1158,6 +1168,12 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
 
         const senderOpenId = sender?.sender_id?.open_id as string | undefined;
+        // defaultOncall 自动绑定必须在 canTalk 权限判断前完成，否则已开 defaultOncall
+        // 的群首次 @bot 时 oncallChats 中还没有该 chat → evaluateTalk 判无权限 → 误弹
+        // 自助授权申请卡。ensureDefaultOncallBound 本身带 fast-path 短路且 idempotent。
+        await ensureDefaultOncallBound(larkAppId, chatId, chatType).catch(err =>
+          logger.warn(`[oncall:${larkAppId}] pre-permission auto-bind failed for ${chatId.substring(0, 12)}: ${err}`),
+        );
         const isAllowed = canTalk(larkAppId, chatId, senderOpenId);
 
         // /introduce — collaboration handshake. Intercept before any routing
