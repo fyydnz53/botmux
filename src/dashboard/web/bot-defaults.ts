@@ -204,7 +204,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
           </section>
         </section>
         <section class="bd-tile">${renderRoleSection(b)}</section>
-        <section class="bd-tile">${renderCardBehaviorSection(b)}${renderP2pModeSection(b)}${renderBrandSection(b)}</section>
+        <section class="bd-tile">${renderCardBehaviorSection(b)}${renderSessionModeSection(b)}${renderBrandSection(b)}</section>
         <section class="bd-tile">${renderGrantSection(b)}</section>
       </div>
     </article>`;
@@ -297,23 +297,41 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
     </section>`;
   }
 
-  // 私聊单聊模式 p2pMode（thread | chat）。Select 一改即 PUT
-  // /api/bots/:appId/p2p-mode（走 applyConfigField，与 /botconfig 同路径）。
-  function renderP2pModeSection(b: any): string {
-    const mode: string = b.p2pMode === 'chat' ? 'chat' : 'thread';
+  // 会话模式：私聊（p2pMode）+ 普通群（regularGroupReplyInThread）两个默认会话方式
+  // 放在同一板块，各自一个下拉、一改即保存。
+  //   • p2pMode          → PUT /api/bots/:appId/p2p-mode（走 applyConfigField，与 /botconfig 同路径）
+  //   • 普通群默认模式    → PUT /api/bots/:appId/card-prefs 的 regularGroupReplyInThread 布尔
+  //                        （chat = false / new-topic = true，默认 chat）
+  // 普通群第三态 topic_alias 仍是 per-chat 的 /reply-mode 高级项，不在此 per-bot 默认里。
+  function renderSessionModeSection(b: any): string {
+    const p2p: string = b.p2pMode === 'chat' ? 'chat' : 'thread';
+    const regular: string = b.regularGroupReplyInThread === true ? 'new-topic' : 'chat';
     return `<section class="bd-section">
-      <h3 class="bd-section-title">${t('botDefaults.sectionP2p')}</h3>
+      <h3 class="bd-section-title">${t('botDefaults.sectionSessionMode')}</h3>
       <div class="bd-row">
         <label>
           <span>${t('botDefaults.p2pMode')}</span>
           <select data-input="p2pMode">
-            <option value="thread" ${mode === 'chat' ? '' : 'selected'}>${escapeHtml(t('botDefaults.p2pThread'))}</option>
-            <option value="chat" ${mode === 'chat' ? 'selected' : ''}>${escapeHtml(t('botDefaults.p2pChat'))}</option>
+            <option value="thread" ${p2p === 'chat' ? '' : 'selected'}>${escapeHtml(t('botDefaults.p2pThread'))}</option>
+            <option value="chat" ${p2p === 'chat' ? 'selected' : ''}>${escapeHtml(t('botDefaults.p2pChat'))}</option>
           </select>
         </label>
         <small class="bd-help">${t('botDefaults.p2pHelp')}</small>
         <div class="actions">
           <span class="oncall-status" data-p2p-status></span>
+        </div>
+      </div>
+      <div class="bd-row">
+        <label>
+          <span>${t('botDefaults.regularGroupMode')}</span>
+          <select data-input="regularGroupMode">
+            <option value="chat" ${regular === 'new-topic' ? '' : 'selected'}>${escapeHtml(t('botDefaults.regularGroupModeChat'))}</option>
+            <option value="new-topic" ${regular === 'new-topic' ? 'selected' : ''}>${escapeHtml(t('botDefaults.regularGroupModeNewTopic'))}</option>
+          </select>
+        </label>
+        <small class="bd-help">${t('botDefaults.regularGroupModeHelp')}</small>
+        <div class="actions">
+          <span class="oncall-status" data-regular-group-status></span>
         </div>
       </div>
     </section>`;
@@ -363,7 +381,6 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
   function renderAutoStartControls(b: any): string {
     const onJoin = b.autoStartOnGroupJoin === true;
     const onTopic = b.autoStartOnNewTopic === true;
-    const regularGroupThread = b.regularGroupReplyInThread === true;
     const joinPrompt: string = typeof b.autoStartOnGroupJoinPrompt === 'string' ? b.autoStartOnGroupJoinPrompt : '';
     return `<div class="bd-subsection">
       <h4 class="bd-subsection-title">${t('botDefaults.sectionAutoStart')}</h4>
@@ -388,11 +405,6 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         <span class="switch" aria-hidden="true"></span>
         <span class="toggle-tx"><strong>${t('botDefaults.autoStartTopic')}</strong>
         <small>${t('botDefaults.autoStartTopicHelp')}</small></span>
-      </label>
-      <label class="checkbox-row">
-        <input type="checkbox" data-action="toggle-regular-group-thread" ${regularGroupThread ? 'checked' : ''}>
-        <strong>${t('botDefaults.regularGroupThread')}</strong>
-        <small>${t('botDefaults.regularGroupThreadHelp')}</small>
       </label>
       <div class="actions">
         <span class="oncall-status" data-auto-start-status></span>
@@ -524,7 +536,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       // lands (defaults to the card-behaviour status line).
       async function putCardPref(
         patch: Record<string, boolean | string>,
-        selfEl: HTMLInputElement | HTMLButtonElement,
+        selfEl: HTMLInputElement | HTMLButtonElement | HTMLSelectElement,
         statusEl: HTMLElement | null = cardPrefStatusEl,
       ) {
         if (!statusEl) return;
@@ -588,7 +600,6 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       // ── 主动开工 toggles + 场景① prompt ───────────────────────────────────
       const autoJoinCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-auto-join]');
       const autoTopicCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-auto-topic]');
-      const regularGroupThreadCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-regular-group-thread]');
       const autoJoinPromptEl = card.querySelector<HTMLTextAreaElement>('textarea[data-input=autoJoinPrompt]');
       const autoJoinPromptSaveBtn = card.querySelector<HTMLButtonElement>('button[data-action=save-auto-join-prompt]');
       const autoStartStatusEl = card.querySelector<HTMLSpanElement>('[data-auto-start-status]');
@@ -600,11 +611,6 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       if (autoTopicCb) {
         autoTopicCb.addEventListener('change', () => {
           putCardPref({ autoStartOnNewTopic: autoTopicCb.checked }, autoTopicCb, autoStartStatusEl);
-        });
-      }
-      if (regularGroupThreadCb) {
-        regularGroupThreadCb.addEventListener('change', () => {
-          putCardPref({ regularGroupReplyInThread: regularGroupThreadCb.checked }, regularGroupThreadCb, autoStartStatusEl);
         });
       }
       if (autoJoinPromptEl && autoJoinPromptSaveBtn) {
@@ -644,6 +650,21 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
           } finally {
             p2pModeSel.disabled = false;
           }
+        });
+      }
+
+      // ── 普通群默认会话模式 regularGroupReplyInThread select ─────────────────
+      // chat = 整群一个连续会话（默认）；new-topic = 每条顶层 @ 开独立话题。
+      // 复用 card-prefs 路径（与旧复选框同字段，只是 UI 改成下拉）。
+      const regularGroupModeSel = card.querySelector<HTMLSelectElement>('select[data-input=regularGroupMode]');
+      const regularGroupStatusEl = card.querySelector<HTMLSpanElement>('[data-regular-group-status]');
+      if (regularGroupModeSel) {
+        regularGroupModeSel.addEventListener('change', () => {
+          putCardPref(
+            { regularGroupReplyInThread: regularGroupModeSel.value === 'new-topic' },
+            regularGroupModeSel,
+            regularGroupStatusEl,
+          );
         });
       }
 
