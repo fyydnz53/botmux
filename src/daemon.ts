@@ -78,6 +78,7 @@ import {
   ensureTerminalWorkerPort,
 } from './core/session-manager.js';
 import { beginReplyTargetTurn, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
+import { sweepIdleWorkers } from './core/idle-worker-sweeper.js';
 import { handleCardAction } from './im/lark/card-handler.js';
 import type { CardHandlerDeps } from './im/lark/card-handler.js';
 import {
@@ -3167,6 +3168,14 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Restore active sessions from previous run
   await restoreActiveSessions(activeSessions);
 
+  const idleWorkerSweepTimer = setInterval(() => {
+    const suspended = sweepIdleWorkers(activeSessions);
+    if (suspended.length > 0) {
+      logger.info(`[idle-worker-sweeper] suspended ${suspended.length} idle worker(s)`);
+    }
+  }, 60_000);
+  idleWorkerSweepTimer.unref?.();
+
   await attachColdWorkflowRuns(cfg.larkAppId);
 
   // Start scheduler in every daemon.  Each daemon owns exactly one bot, so
@@ -3196,6 +3205,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     workflowEventWatchers.clear();
     workflowRuns.clear();
     clearInterval(descriptorHeartbeat);
+    clearInterval(idleWorkerSweepTimer);
     if (memoryDiagnostics) clearInterval(memoryDiagnostics);
     removeDaemonDescriptor(cfg.larkAppId);
     ipcHandle.close().catch(() => { /* swallow */ });
@@ -3265,6 +3275,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // the descriptor so the dashboard doesn't see a phantom daemon.
   process.on('exit', () => {
     clearInterval(descriptorHeartbeat);
+    clearInterval(idleWorkerSweepTimer);
     if (memoryDiagnostics) clearInterval(memoryDiagnostics);
     removeDaemonDescriptor(cfg.larkAppId);
     // Plain-exit path (uncaught fatal, manual process.exit) bypasses the
