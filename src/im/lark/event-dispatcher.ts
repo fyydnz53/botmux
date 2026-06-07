@@ -1452,13 +1452,21 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // reject multi-bot thread replies simply because `routing.scope` was
           // folded back to chat-scope.
           //
-          // mention mode 'never': a bot-global opt-in that drops the @ requirement
-          // entirely — any message from a talk-allowed sender is answered (incl.
-          // brand-new non-@ top-level, which then spawns/continues a session).
-          // Gated on isAllowed so restricted groups still only react to permitted
-          // senders. Intended for dedicated / on-call groups, not busy multi-人 chats.
+          // The bot-global mention policy drops the @ requirement:
+          //   • 'never' — entirely: any message from a talk-allowed sender is
+          //     answered (incl. brand-new non-@ top-level → spawns/continues a
+          //     session). Intended for dedicated / on-call groups, not busy chats.
+          //   • 'topic' — only inside a topic the bot already owns: a non-@ reply
+          //     INSIDE such a thread (new-topic / 话题群 thread the bot owns, or a
+          //     shared-topic alias via replyRootId) continues without @, while a
+          //     brand-new top-level conversation still requires @.
+          // Both gated on isAllowed so restricted groups still only react to
+          // permitted senders. (The shared fold-back's replyRootId is already
+          // handled by the first clause.)
+          const mentionMode = resolveGroupMentionMode(larkAppId);
           const relax = (!!replyRootId && isAllowed)
-            || (isAllowed && resolveGroupMentionMode(larkAppId) === 'never')
+            || (isAllowed && mentionMode === 'never')
+            || (isAllowed && mentionMode === 'topic' && ownsSession && !!message.thread_id)
             || (ownsSession && isAllowed && !!stats && stats.userCount <= 1 && stats.botCount <= 1);
           if (!relax) {
             const access = await checkGroupMessageAccess(larkAppId, message, chatId, senderOpenId);

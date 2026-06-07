@@ -1367,6 +1367,56 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
+  it('mention mode topic: a non-@ reply inside an owned thread (new-topic/话题群) is answered even in a multi-person group', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID], regularGroupMentionMode: 'topic' });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 1 }); // multi-person → no 1v1 relax
+    handlers.resolveReplyThreadAlias.mockReturnValue(null); // not a shared alias — a real owned thread
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'owned-topic-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'follow up inside the topic, no @' }),
+      rootId: 'owned-topic-root',
+      threadId: 'owned-topic-root',
+      messageId: 'msg-in-owned-topic',
+      chatId: 'chat-topic-tier',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'owned-topic-root',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('mention mode always (default): a non-@ reply inside an owned thread is ignored in a multi-person group (@ required even in topics)', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default always
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 1 });
+    handlers.resolveReplyThreadAlias.mockReturnValue(null);
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'owned-topic-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'follow up inside the topic, no @' }),
+      rootId: 'owned-topic-root',
+      threadId: 'owned-topic-root',
+      messageId: 'msg-in-owned-topic-always',
+      chatId: 'chat-always-tier',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
   it('shared + never: a non-@ top-level message OPENS a topic (seeds replyRootId), not a flat reply', async () => {
     // Regression: shared mode + never must auto-open a topic even without @,
     // instead of replying at the group top level.
