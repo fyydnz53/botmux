@@ -24,7 +24,7 @@ import { openPending, isThrottled } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { chatQuotaKey, globalQuotaKey } from '../../services/grant-store.js';
 import { ensureDefaultOncallBound } from '../../services/oncall-store.js';
-import { resolveRegularGroupMode } from '../../services/chat-reply-mode-store.js';
+import { resolveRegularGroupMode, resolveGroupMentionMode } from '../../services/chat-reply-mode-store.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -1024,7 +1024,11 @@ async function maybeApplySharedTopicSeed(input: {
   if (forceTopicApplied) return undefined;
   if (chatType !== 'group') return undefined;
   if (resolveRegularGroupMode(larkAppId, chatId) !== 'shared') return undefined;
-  if (!isBotMentioned(larkAppId, message, senderOpenId)) return undefined;
+  // Seeding a shared topic normally needs an @mention. But under the 'never'
+  // mention policy a non-@ message is also answered — and in shared mode it must
+  // still OPEN a topic (reply in a thread reusing the chat session), not fall
+  // back to a flat top-level reply. So allow non-@ seeding only when never.
+  if (!isBotMentioned(larkAppId, message, senderOpenId) && resolveGroupMentionMode(larkAppId) !== 'never') return undefined;
   const freshMode = routing.scope === 'thread'
     ? await getChatMode(larkAppId, chatId, { forceRefresh: true })
     : (getCachedChatMode(larkAppId, chatId) ?? 'group');
@@ -1322,10 +1326,16 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         let replyRootId: string | undefined;
         const explicitlyMentionedThisBot = isBotMentioned(larkAppId, message, senderOpenId);
 
-        // Topic-alias reply: a message in a Lark thread can still belong to the
-        // regular group's chat-scope session when that root was registered by
-        // `/reply-mode`. Fold it back to chatId before ownership / serialize.
-        if (!explicitlyMentionedThisBot && routing.scope === 'thread' && message.root_id && message.thread_id && chatType === 'group') {
+        // Shared-mode follow-up: a non-@ message inside a Lark thread can belong
+        // to the regular group's chat-scope session when that root was registered
+        // as a shared-topic alias. Whether a 普通群 answers it without an @mention
+        // is governed by the bot-global mention policy: 'always' (default) keeps
+        // "@ required" so this fold-back is skipped (non-@ thread chatter falls
+        // through to the gate below and is ignored — only an explicit @ continues
+        // a shared topic); 'topic' and 'never' enable the seamless no-@ fold-back.
+        if (!explicitlyMentionedThisBot
+            && resolveGroupMentionMode(larkAppId) !== 'always'
+            && routing.scope === 'thread' && message.root_id && message.thread_id && chatType === 'group') {
           const alias = handlers.resolveReplyThreadAlias?.(message.root_id, chatId, larkAppId) ?? null;
           if (alias) {
             const freshMode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
@@ -1441,7 +1451,23 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // Lark thread). Do not re-run the generic group @ gate, which would
           // reject multi-bot thread replies simply because `routing.scope` was
           // folded back to chat-scope.
-          const relax = (!!replyRootId && isAllowed) || (ownsSession && isAllowed && !!stats && stats.userCount <= 1 && stats.botCount <= 1);
+          //
+          // The bot-global mention policy drops the @ requirement:
+          //   • 'never' — entirely: any message from a talk-allowed sender is
+          //     answered (incl. brand-new non-@ top-level → spawns/continues a
+          //     session). Intended for dedicated / on-call groups, not busy chats.
+          //   • 'topic' — only inside a topic the bot already owns: a non-@ reply
+          //     INSIDE such a thread (new-topic / 话题群 thread the bot owns, or a
+          //     shared-topic alias via replyRootId) continues without @, while a
+          //     brand-new top-level conversation still requires @.
+          // Both gated on isAllowed so restricted groups still only react to
+          // permitted senders. (The shared fold-back's replyRootId is already
+          // handled by the first clause.)
+          const mentionMode = resolveGroupMentionMode(larkAppId);
+          const relax = (!!replyRootId && isAllowed)
+            || (isAllowed && mentionMode === 'never')
+            || (isAllowed && mentionMode === 'topic' && ownsSession && !!message.thread_id)
+            || (ownsSession && isAllowed && !!stats && stats.userCount <= 1 && stats.botCount <= 1);
           if (!relax) {
             const access = await checkGroupMessageAccess(larkAppId, message, chatId, senderOpenId);
             if (access === 'not_allowed') {
