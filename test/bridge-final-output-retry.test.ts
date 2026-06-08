@@ -216,6 +216,32 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     expect(cardJson).not.toContain('<at id=ou_foreign_bot></at>');
   });
 
+  it('addresses Mira daemon fallback output back to the bot dispatcher', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+
+    const ds = makeDs();
+    ds.session.cliId = 'mira';
+    ds.session.ownerOpenId = undefined;
+    ds.ownerOpenId = undefined;
+    ds.session.creatorOpenId = 'ou_dispatcher_bot';
+    ds.session.quoteTargetSenderIsBot = true;
+
+    const { __testOnly_deliverFinalOutput } = await import('../src/core/worker-pool.js') as any;
+    __testOnly_deliverFinalOutput(ds, finalOutputMsg(), 'tag', 0);
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(sessionReply).toHaveBeenCalledTimes(1);
+    const cardJson = sessionReply.mock.calls[0][1] as string;
+    expect(cardJson).toContain('<at id=ou_dispatcher_bot></at>');
+  });
+
   it('keeps daemon final-output footer addressing for a human owner', async () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
