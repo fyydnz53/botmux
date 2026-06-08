@@ -219,6 +219,19 @@ function ensureUniqueBotProcessNames(bots: any[]): void {
   }
 }
 
+function botProcessEnv(bot: any): Record<string, string> {
+  const raw = bot && typeof bot === 'object' && bot.env && typeof bot.env === 'object' && !Array.isArray(bot.env)
+    ? bot.env
+    : {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (typeof value === 'string') out[key] = value;
+    else if (typeof value === 'number' || typeof value === 'boolean') out[key] = String(value);
+  }
+  return out;
+}
+
 function ecosystemConfig(): string {
   const daemonScript = join(PKG_ROOT, 'dist', 'index-daemon.js');
   const bots = loadBotsJson();
@@ -247,6 +260,7 @@ function ecosystemConfig(): string {
     error_file: join(LOG_DIR, `daemon-${i}-error.log`),
     out_file: join(LOG_DIR, `daemon-${i}-out.log`),
     env: {
+      ...botProcessEnv(_bot),
       SESSION_DATA_DIR: DATA_DIR,
       BOTMUX_BOT_INDEX: String(i),
       // Native-memory diagnostics. Default off; operator can flip it on
