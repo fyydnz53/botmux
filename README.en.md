@@ -329,6 +329,25 @@ Gemini / OpenCode / Antigravity), with no MCP protocol support required.
 
 ---
 
+### Per-Bot Environment Variables
+
+Each `bots.json` entry can define its own `env` object. These variables are injected into that bot's daemon/CLI process, which is useful for per-bot proxies, API base URLs, or CLI-specific feature flags:
+
+```json
+{
+  "cliId": "codex",
+  "workingDir": "~/projects",
+  "env": {
+    "HTTPS_PROXY": "http://127.0.0.1:7890",
+    "OPENAI_BASE_URL": "https://api.example.com/v1"
+  }
+}
+```
+
+`env` only accepts valid environment variable names, with string, number, or boolean values. Do not treat it as a secret vault: process environments may be visible to local diagnostic tools.
+
+---
+
 ## 📖 Documentation
 
 The full reference — commands, config, best practices, troubleshooting — lives in the docs site; not duplicated here —

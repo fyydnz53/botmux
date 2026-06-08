@@ -160,6 +160,19 @@ export function botProcessName(
   return `${prefix}-${name ?? index}`;
 }
 
+export function botProcessEnv(bot: { env?: unknown }): Record<string, string> {
+  const raw = bot && typeof bot === 'object' && bot.env && typeof bot.env === 'object' && !Array.isArray(bot.env)
+    ? bot.env as Record<string, unknown>
+    : {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (typeof value === 'string') out[key] = value;
+    else if (typeof value === 'number' || typeof value === 'boolean') out[key] = String(value);
+  }
+  return out;
+}
+
 export function normalizeBotConfig<T extends Record<string, any>>(bot: T): T {
   const out: Record<string, any> = { ...bot };
   if (typeof out.name !== 'string') return out as T;

@@ -7,7 +7,11 @@
     "disableCliBypass": true,
     "allowedUsers": ["alice@company.com"],
     "allowedChatGroups": ["oc_xxx_team"],
-    "workingDir": "~/projects"
+    "workingDir": "~/projects",
+    "env": {
+      "HTTPS_PROXY": "http://127.0.0.1:7890",
+      "OPENAI_BASE_URL": "https://api.example.com/v1"
+    }
   },
   {
     "larkAppId": "cli_xxx_bot2",

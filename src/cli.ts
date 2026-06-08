@@ -33,6 +33,7 @@ import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
 import {
   applyBotConfigEdits,
   assertUniqueBotProcessNames,
+  botProcessEnv,
   botProcessName,
   normalizeBotConfig,
   parseBotConfigsJson,
@@ -217,19 +218,6 @@ function ensureUniqueBotProcessNames(bots: any[]): void {
     console.error('   请修改 bots.json 中的 name，确保进程名唯一。');
     process.exit(1);
   }
-}
-
-function botProcessEnv(bot: any): Record<string, string> {
-  const raw = bot && typeof bot === 'object' && bot.env && typeof bot.env === 'object' && !Array.isArray(bot.env)
-    ? bot.env
-    : {};
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-    if (typeof value === 'string') out[key] = value;
-    else if (typeof value === 'number' || typeof value === 'boolean') out[key] = String(value);
-  }
-  return out;
 }
 
 function ecosystemConfig(): string {
