@@ -290,13 +290,19 @@ export function prepareSandbox(opts: {
   // masked ~/.botmux so the agent's skills load (but bots.json stays hidden).
   const pluginDir = join(home, '.botmux', 'claude-plugin');
   if (existsSync(pluginDir)) args.push('--ro-bind-try', pluginDir, pluginDir);
-  args.push('--', opts.cliBin, ...opts.cliArgs);
 
+  // Set the sandbox env via bwrap --setenv (authoritative for the child) rather
+  // than relying on the spawn env. The tmux backend only forwards a fixed
+  // whitelist (BOTMUX_INJECTED_ENV_KEYS) to its pane, which does NOT include
+  // HOME / PATH / BOTMUX_SEND_RELAY — so without --setenv the sandbox would only
+  // work under the pty backend. --setenv makes pty AND tmux both work.
   const env: Record<string, string> = {
     HOME: home,                          // scoped home is mounted AT the real home path
-    BOTMUX_SEND_RELAY: outbox,
-    PATH: `/sbxbin:${process.env.PATH ?? ''}`,
+    BOTMUX_SEND_RELAY: outbox,           // routes `botmux send` to the daemon outbox watcher
+    PATH: `/sbxbin:${process.env.PATH ?? ''}`,  // /sbxbin first so `botmux` = the relay shim
   };
+  for (const [k, v] of Object.entries(env)) args.push('--setenv', k, v);
+  args.push('--', opts.cliBin, ...opts.cliArgs);
 
   return {
     bin: 'bwrap',

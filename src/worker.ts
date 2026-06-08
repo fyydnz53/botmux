@@ -3193,15 +3193,6 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // fall back to PTY rather than letting attach-session / new-session spam
   // the daemon error log every poll cycle.
   let effectiveBackend = cfg.backendType;
-  // File sandbox is wrapped at the PTY spawn only (tmux/zellij spawn via the
-  // server and aren't bwrap-wrapped). So when sandbox is ON, FORCE pty —
-  // otherwise toggling sandbox on a tmux-backed bot silently does nothing (the
-  // session re-attaches to its tmux session and runs un-sandboxed). This makes
-  // the per-bot sandbox flag actually engage regardless of the bot's backend.
-  if ((cfg.sandbox === true || sandboxEnabled()) && effectiveBackend !== 'pty') {
-    log(`Sandbox on → forcing pty backend (was ${effectiveBackend})`);
-    effectiveBackend = 'pty';
-  }
   if (effectiveBackend === 'tmux' && !TmuxBackend.isAvailable()) {
     log('tmux backend requested but functional probe failed — falling back to PTY backend');
     effectiveBackend = 'pty';
@@ -3361,8 +3352,11 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   let spawnBin = cliAdapter.resolvedBin;
   let spawnArgs = args;
   let spawnCwd = cfg.workingDir;
+  // Sandbox wraps the spawned binary in bwrap. Works for pty (PtyBackend runs
+  // bwrap directly) and tmux (the tmux pane's command becomes `bwrap … -- cli`);
+  // env is carried via bwrap --setenv (see prepareSandbox), not the backend.
   const sandboxOn = cfg.sandbox === true || sandboxEnabled();
-  if (sandboxOn && effectiveBackendType === 'pty' && process.env.SESSION_DATA_DIR) {
+  if (sandboxOn && (effectiveBackendType === 'pty' || effectiveBackendType === 'tmux') && process.env.SESSION_DATA_DIR) {
     try {
       const sbx = prepareSandbox({
         enabled: sandboxOn,
