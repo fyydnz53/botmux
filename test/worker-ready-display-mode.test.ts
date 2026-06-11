@@ -68,6 +68,7 @@ vi.mock('../src/services/frozen-card-store.js', () => ({
 
 vi.mock('../src/core/session-manager.js', () => ({
   persistStreamCardState: vi.fn(),
+  rememberLastCliInput: vi.fn(),
 }));
 
 vi.mock('../src/core/dashboard-events.js', () => ({
@@ -308,5 +309,53 @@ describe('Worker ready: set_display_mode re-sync', () => {
     expect(fakeWorker.send).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'raw_input' }),
     );
+  });
+
+  it('prompt_ready delivers buffered follow-up input AFTER the raw slash command, once', async () => {
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      worker: fakeWorker,
+      pendingRawInput: '/goal ship the onboarding flow',
+      pendingFollowUpInput: {
+        userPrompt: '另外帮我顺手看下 CI',
+        cliInput: '<user_message>另外帮我顺手看下 CI</user_message>',
+      },
+    } as Partial<DaemonSession>);
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'prompt_ready' });
+    await flush();
+
+    const sentTypes = fakeWorker.send.mock.calls.map((c: any[]) => c[0]?.type);
+    const rawIdx = sentTypes.indexOf('raw_input');
+    const msgIdx = sentTypes.indexOf('message');
+    expect(rawIdx).toBeGreaterThanOrEqual(0);
+    expect(msgIdx).toBeGreaterThan(rawIdx);
+    expect(fakeWorker.send).toHaveBeenCalledWith({
+      type: 'message',
+      content: '<user_message>另外帮我顺手看下 CI</user_message>',
+    });
+    expect(ds.pendingRawInput).toBeUndefined();
+    expect(ds.pendingFollowUpInput).toBeUndefined();
+
+    fakeWorker.send.mockClear();
+    fakeWorker.emit('message', { type: 'prompt_ready' });
+    await flush();
+    expect(fakeWorker.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'message' }));
+  });
+
+  it('prompt_ready without pending raw input never emits the buffered follow-up alone', async () => {
+    const fakeWorker = makeFakeWorker();
+    // Follow-up input only exists alongside pendingRawInput (built at the same
+    // fork site); if state drifts, it must not fire without the raw command.
+    const ds = makeDs({
+      worker: fakeWorker,
+      pendingFollowUpInput: { userPrompt: 'x', cliInput: '<user_message>x</user_message>' },
+    } as Partial<DaemonSession>);
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'prompt_ready' });
+    await flush();
+    expect(fakeWorker.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'message' }));
   });
 });

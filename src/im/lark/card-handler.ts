@@ -1298,9 +1298,15 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         publishAttentionPatch(ds);
         const pendingPrompt = ds.pendingPrompt ?? '';
         const pendingRawInput = ds.pendingRawInput;
-        const prompt = pendingRawInput
-          ? ''
-          : buildNewTopicPrompt(
+        // Raw-input cold start still wraps any input buffered while the repo
+        // card was pending (follow-ups / attachments) — delivered right after
+        // the raw input on prompt_ready instead of being dropped.
+        const hasBufferedInput =
+          pendingPrompt.trim().length > 0 ||
+          (ds.pendingAttachments?.length ?? 0) > 0 ||
+          (ds.pendingFollowUps?.length ?? 0) > 0;
+        const wrappedPrompt = (!pendingRawInput || hasBufferedInput)
+          ? buildNewTopicPrompt(
               pendingPrompt,
               ds.session.sessionId,
               effectiveCliId,
@@ -1313,7 +1319,15 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
               locDs,
               ds.pendingSender,
               { larkAppId: ds.larkAppId, chatId: ds.chatId },
-            );
+            )
+          : '';
+        const prompt = pendingRawInput ? '' : wrappedPrompt;
+        if (pendingRawInput && hasBufferedInput) {
+          ds.pendingFollowUpInput = {
+            userPrompt: pendingPrompt || (ds.pendingFollowUps?.join('\n\n') ?? ''),
+            cliInput: wrappedPrompt,
+          };
+        }
         rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? prompt);
         ds.pendingPrompt = undefined;
         ds.pendingAttachments = undefined;
@@ -1507,9 +1521,14 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       publishAttentionPatch(targetDs);
       const pendingPrompt = targetDs.pendingPrompt ?? '';
       const pendingRawInput = targetDs.pendingRawInput;
-      const prompt = pendingRawInput
-        ? ''
-        : buildNewTopicPrompt(
+      // Raw-input cold start still wraps any input buffered while the repo card
+      // was pending — see the skip_repo branch above for the rationale.
+      const hasBufferedInput =
+        pendingPrompt.trim().length > 0 ||
+        (targetDs.pendingAttachments?.length ?? 0) > 0 ||
+        (targetDs.pendingFollowUps?.length ?? 0) > 0;
+      const wrappedPrompt = (!pendingRawInput || hasBufferedInput)
+        ? buildNewTopicPrompt(
             pendingPrompt,
             targetDs.session.sessionId,
             effectiveCliId,
@@ -1522,13 +1541,21 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
             locTarget,
             targetDs.pendingSender,
             { larkAppId: targetDs.larkAppId, chatId: targetDs.chatId },
-          );
+          )
+        : '';
+      const prompt = pendingRawInput ? '' : wrappedPrompt;
       // Last-line defence: prompt prep awaited above — if anything replaced
       // OR closed the session in that window, forking now would clobber it
       // (or resurrect a /close'd session).
       if (!sessionStillActive() || targetDs.session.sessionId !== commitGenSessionId) {
         logger.warn(`[${tag(targetDs)}] Session replaced or closed while preparing the pending-CLI prompt (${commitGenSessionId} → ${targetDs.session.sessionId}, active=${sessionStillActive()}) — aborting this fork`);
         return;
+      }
+      if (pendingRawInput && hasBufferedInput) {
+        targetDs.pendingFollowUpInput = {
+          userPrompt: pendingPrompt || (targetDs.pendingFollowUps?.join('\n\n') ?? ''),
+          cliInput: wrappedPrompt,
+        };
       }
       rememberLastCliInput(targetDs, pendingRawInput ?? pendingPrompt, pendingRawInput ?? prompt);
       targetDs.pendingPrompt = undefined;

@@ -58,6 +58,13 @@ export interface DaemonSession {
    *  botmux-wrapped `<user_message>`. In-memory only to avoid replaying after
    *  daemon restart. */
   pendingRawInput?: string;
+  /** Wrapped prompt for messages buffered while a pendingRawInput session
+   *  waited for repo selection (pendingFollowUps / attachments). Built at the
+   *  fork site (where prompt-building context lives) and delivered right
+   *  after the raw input on prompt_ready, so the buffered messages queue as
+   *  the next turn instead of being dropped. In-memory only, like
+   *  pendingRawInput. */
+  pendingFollowUpInput?: { userPrompt: string; cliInput: string };
   pendingAttachments?: LarkAttachment[];
   pendingMentions?: LarkMention[];    // @mentions from initial message, used when building prompt after repo selection
   /** Sender (open_id + type + resolved name) of the initial message — stashed

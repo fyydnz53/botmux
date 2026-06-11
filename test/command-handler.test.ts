@@ -1296,6 +1296,50 @@ describe('handleCommand', () => {
       expect(ds.pendingRepo).toBe(false);
     });
 
+    it('raw-input cold start boots idle and leaves pendingRawInput for prompt_ready', async () => {
+      // /goal cold start → repo card → bare /repo skip: the raw command must
+      // NOT be wrapped into a prompt; it stays on ds.pendingRawInput and the
+      // prompt_ready handler delivers it literally.
+      const ds = makeDaemonSession({ pendingRepo: true, pendingPrompt: '', pendingRawInput: '/goal 发布 onboarding' });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
+
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', false);
+      expect(buildNewTopicPrompt).not.toHaveBeenCalled();
+      expect(ds.pendingRawInput).toBe('/goal 发布 onboarding');
+      expect(ds.pendingFollowUpInput).toBeUndefined();
+    });
+
+    it('raw-input cold start wraps follow-ups buffered during repo wait into pendingFollowUpInput', async () => {
+      // /goal cold start → repo card pending → user keeps typing (buffered in
+      // pendingFollowUps) → bare /repo skips the card. The buffered messages
+      // must be wrapped and stashed for delivery after the raw input — not
+      // silently dropped.
+      const ds = makeDaemonSession({
+        pendingRepo: true,
+        pendingPrompt: '',
+        pendingRawInput: '/goal 发布 onboarding',
+        pendingFollowUps: ['对了顺手看下 CI', '别忘了更新 changelog'],
+      });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
+
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', false);
+      // Wrapped via buildNewTopicPrompt (mock → `WRAPPED:<pendingPrompt>`),
+      // follow-ups passed through as the 8th arg.
+      expect(buildNewTopicPrompt).toHaveBeenCalled();
+      expect((buildNewTopicPrompt as ReturnType<typeof vi.fn>).mock.calls[0][7])
+        .toEqual(['对了顺手看下 CI', '别忘了更新 changelog']);
+      expect(ds.pendingFollowUpInput).toEqual({
+        userPrompt: '对了顺手看下 CI\n\n别忘了更新 changelog',
+        cliInput: 'WRAPPED:',
+      });
+      expect(ds.pendingRawInput).toBe('/goal 发布 onboarding');
+      expect(ds.pendingFollowUps).toBeUndefined();
+    });
+
     it('should report an invalid workingDir and not spawn (keeps pending for recovery)', async () => {
       // forkWorker doesn't validate cwd, so a dead workingDir must be caught
       // before launch. Keep pendingRepo so the user can `/repo <valid-path>`.

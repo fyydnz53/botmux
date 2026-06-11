@@ -13,7 +13,7 @@ import { hookCommandFor } from '../adapters/hook-command.js';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 import * as sessionStore from '../services/session-store.js';
-import { persistStreamCardState } from './session-manager.js';
+import { persistStreamCardState, rememberLastCliInput } from './session-manager.js';
 import { updateMessage, deleteMessage, sendEphemeralCard, sendUserMessage, addReaction, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildRelayedFrozenCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
@@ -1780,6 +1780,16 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           ds.pendingRawInput = undefined;
           ds.worker.send({ type: 'raw_input', content: rawInput } as DaemonToWorker);
           logger.info(`[${t}] Sent pending raw input after prompt_ready: ${rawInput.substring(0, 80)}`);
+          // Input buffered while the repo card was pending: deliver AFTER the
+          // raw input so the worker queues it as the next turn (type-ahead /
+          // pendingMessages) instead of racing ahead of the slash command.
+          const followUp = ds.pendingFollowUpInput;
+          if (followUp) {
+            ds.pendingFollowUpInput = undefined;
+            ds.worker.send({ type: 'message', content: followUp.cliInput } as DaemonToWorker);
+            rememberLastCliInput(ds, followUp.userPrompt, followUp.cliInput);
+            logger.info(`[${t}] Sent buffered follow-up after raw input (${followUp.cliInput.length} chars)`);
+          }
         }
         break;
       }

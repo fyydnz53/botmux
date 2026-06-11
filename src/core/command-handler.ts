@@ -1059,6 +1059,30 @@ export async function handleCommand(
             (ds!.pendingAttachments?.length ?? 0) > 0 ||
             (ds!.pendingFollowUps?.length ?? 0) > 0;
           if (pendingRawInput) {
+            // Messages buffered while the repo card was pending must not be
+            // dropped: wrap them now (full prompt-building context lives here)
+            // and stash for delivery right after the raw input on prompt_ready.
+            if (hasBufferedInput) {
+              const { buildNewTopicPrompt, getAvailableBots } = await import('./session-manager.js');
+              const followUpPrompt = buildNewTopicPrompt(
+                pendingPrompt,
+                ds!.session.sessionId,
+                botCfg.cliId,
+                botCfg.cliPathOverride,
+                ds!.pendingAttachments,
+                ds!.pendingMentions,
+                await getAvailableBots(ds!.larkAppId, ds!.chatId),
+                ds!.pendingFollowUps,
+                { name: selfBot.botName, openId: selfBot.botOpenId },
+                loc,
+                ds!.pendingSender,
+                { larkAppId, chatId: ds!.chatId },
+              );
+              ds!.pendingFollowUpInput = {
+                userPrompt: pendingPrompt || (ds!.pendingFollowUps?.join('\n\n') ?? ''),
+                cliInput: followUpPrompt,
+              };
+            }
             rememberLastCliInput(ds!, pendingRawInput, pendingRawInput);
             forkWorker(ds!, '', false);
           } else if (hasBufferedInput) {

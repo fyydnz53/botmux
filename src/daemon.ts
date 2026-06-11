@@ -2055,16 +2055,18 @@ async function startInitialPassthroughSession(args: {
   parsed: LarkMessage;
   commandContent: string;
   senderOpenId?: string;
-  senderUnionId?: string;
-  ownerOpenId?: string;
-  creatorOpenId?: string;
+  /** Ownership is the CALLER's call — required fields, no sender fallback.
+   *  A bot-started cold start must pass undefined (mirrors the auto-create
+   *  path): a foreign-bot owner makes daemon-generated footers wake that bot
+   *  again and leaks owner-gated surfaces (restart/report/cards) to a bot. */
+  ownerOpenId: string | undefined;
+  ownerUnionId: string | undefined;
+  creatorOpenId: string | undefined;
 }): Promise<void> {
   const {
     larkAppId, chatId, chatType, scope, anchor, messageId, replyRootId,
-    parsed, commandContent, senderOpenId, senderUnionId,
+    parsed, commandContent, senderOpenId, ownerOpenId, ownerUnionId, creatorOpenId,
   } = args;
-  const ownerOpenId = args.ownerOpenId ?? senderOpenId;
-  const creatorOpenId = args.creatorOpenId ?? senderOpenId;
   if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor)) {
     return;
   }
@@ -2077,7 +2079,7 @@ async function startInitialPassthroughSession(args: {
   session.larkAppId = larkAppId;
   session.ownerOpenId = ownerOpenId;
   session.creatorOpenId = creatorOpenId;
-  session.ownerUnionId = senderUnionId;
+  session.ownerUnionId = ownerUnionId;
   session.lastCallerOpenId = senderOpenId;
   session.quoteTargetId = parsed.messageId;
   session.quoteTargetSenderOpenId = senderOpenId;
@@ -2263,7 +2265,11 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
           parsed,
           commandContent,
           senderOpenId,
-          senderUnionId,
+          // New-topic senders are humans here (mirrors the normal new-topic
+          // spawn path, which assigns ownership unconditionally too).
+          ownerOpenId: senderOpenId,
+          ownerUnionId: senderUnionId,
+          creatorOpenId: senderOpenId,
         });
         return;
       }
@@ -2872,8 +2878,10 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
           parsed,
           commandContent,
           senderOpenId: threadSenderOpenId,
-          senderUnionId: data?.sender?.sender_id?.union_id,
+          // Bot-started cold starts get no human owner (mirrors the auto-create
+          // path) — see the ownership note on startInitialPassthroughSession.
           ownerOpenId: isForeignBot ? undefined : threadSenderOpenId,
+          ownerUnionId: isForeignBot ? undefined : data?.sender?.sender_id?.union_id,
           creatorOpenId: threadSenderOpenId,
         });
         return;
