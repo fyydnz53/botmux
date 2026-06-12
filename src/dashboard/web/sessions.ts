@@ -405,6 +405,111 @@ export function renderSessionsPage(root: HTMLElement) {
     rerender();
   }
 
+  // ── hub 团队看板（共享编排 + 对方部署会话快照）────────────────────────────
+  // 编排存团队 host：托管团队读本地 /api/team/board/local/<id>，加入的远程团队
+  // 经 spoke 代理 /api/team/remote-board 到 hub。30s 软刷新。
+  let kanbanTeamBoardData: { board: Record<string, { column: string; position: number }>; remoteRows: any[] } | null = null;
+  let kanbanTeamBoardKey = '';
+  let kanbanTeamBoardFetchedAt = 0;
+  let kanbanTeamBoardLoading = false;
+  // 对方部署的行不在 store 里——拖拽落点查这里
+  let kanbanRemoteRows = new Map<string, any>();
+
+  async function ensureTeamBoard(team: { key: string }): Promise<void> {
+    const fresh = kanbanTeamBoardKey === team.key && Date.now() - kanbanTeamBoardFetchedAt < 30_000;
+    if (kanbanTeamBoardLoading || fresh) return;
+    kanbanTeamBoardLoading = true;
+    try {
+      const isLocal = team.key.startsWith('local:');
+      const u = isLocal
+        ? `/api/team/board/local/${encodeURIComponent(team.key.slice('local:'.length))}`
+        : `/api/team/remote-board?key=${encodeURIComponent(team.key)}`;
+      const r = await fetch(u);
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body?.ok === false) return;
+      const myDeploymentId = typeof body.deploymentId === 'string' ? body.deploymentId : null;
+      const remoteRows: any[] = [];
+      kanbanRemoteRows = new Map();
+      for (const rep of Array.isArray(body.reports) ? body.reports : []) {
+        // 远程团队的响应里含自己部署的上报——本地行走实时 store，跳过
+        if (myDeploymentId && rep.deploymentId === myDeploymentId) continue;
+        for (const s of Array.isArray(rep.sessions) ? rep.sessions : []) {
+          const row = { ...s, remoteDeployment: rep.deploymentName || rep.deploymentId };
+          remoteRows.push(row);
+          kanbanRemoteRows.set(String(s.sessionId), row);
+        }
+      }
+      kanbanTeamBoardData = {
+        board: body.board && typeof body.board === 'object' ? body.board : {},
+        remoteRows,
+      };
+      kanbanTeamBoardKey = team.key;
+      kanbanTeamBoardFetchedAt = Date.now();
+      lastKanbanHtml = '';
+      rerender();
+    } catch {
+      // 拉不到 hub 看板时退化为只看本地行
+    } finally {
+      kanbanTeamBoardLoading = false;
+    }
+  }
+
+  /** 团队看板拖拽落盘：写 host 的共享编排（不动会话的个人看板字段）。 */
+  async function persistTeamBoardMove(
+    teamKey: string,
+    sessionId: string,
+    column: SessionKanbanColumn,
+    position: number,
+    prevEntry: { column: string; position: number } | undefined,
+  ): Promise<void> {
+    try {
+      const isLocal = teamKey.startsWith('local:');
+      const r = isLocal
+        ? await fetch(`/api/team/board/local/${encodeURIComponent(teamKey.slice('local:'.length))}/move`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId, column, position }),
+          })
+        : await fetch('/api/team/remote-board-move', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ key: teamKey, sessionId, column, position }),
+          });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body?.ok === false) {
+        if (kanbanTeamBoardData) {
+          if (prevEntry) kanbanTeamBoardData.board[sessionId] = prevEntry;
+          else delete kanbanTeamBoardData.board[sessionId];
+        }
+        lastKanbanHtml = '';
+        rerender();
+        if (r.status !== 401) alert(`${t('sessions.kanban.moveFail')}: ${body?.error ?? r.status}`);
+      }
+    } catch (e) {
+      if (kanbanTeamBoardData) {
+        if (prevEntry) kanbanTeamBoardData.board[sessionId] = prevEntry;
+        else delete kanbanTeamBoardData.board[sessionId];
+      }
+      lastKanbanHtml = '';
+      rerender();
+      alert(`${t('sessions.kanban.moveFail')}: ${e}`);
+    }
+  }
+
+  /** 团队模式拖拽的统一落点：乐观写本地缓存的共享编排 + POST host。 */
+  function applyTeamBoardMove(sessionId: string, column: SessionKanbanColumn, position: number): void {
+    const team = kanbanTeams.find(tm => tm.key === kanbanTeamKey) ?? kanbanTeams[0];
+    if (!team) return;
+    if (!kanbanTeamBoardData || kanbanTeamBoardKey !== team.key) {
+      // 首次拉取尚未完成也允许拖：先建本地空编排缓存，写入照常进行
+      kanbanTeamBoardData = { board: {}, remoteRows: kanbanTeamBoardData?.remoteRows ?? [] };
+      kanbanTeamBoardKey = team.key;
+    }
+    const prev = kanbanTeamBoardData.board[sessionId];
+    kanbanTeamBoardData.board[sessionId] = { column, position };
+    void persistTeamBoardMove(team.key, sessionId, column, position, prev);
+  }
+
   function orderedBoardColumns() {
     return boardOrder
       .map(id => BOARD_COLUMNS.find(c => c.id === id))
@@ -571,15 +676,19 @@ export function renderSessionsPage(root: HTMLElement) {
     const signal = boardSignalLabel(s);
     const desc = [chatTitle, repo !== '-' ? repo : null].filter(Boolean).join(' · ');
     const status = String(s.status ?? 'unknown');
-    return `<article class="kanban-card" data-id="${escapeHtml(s.sessionId)}" tabindex="0" role="button" draggable="true">
+    // 对方部署的会话：数据是 host 快照，终端/历史/改名都在对方机器上做不了——
+    // 只保留状态点与部署来源徽章，卡片仍可拖（团队共享编排）。
+    const remote = typeof s.remoteDeployment === 'string' ? s.remoteDeployment : '';
+    return `<article class="kanban-card${remote ? ' kanban-card-remote' : ''}" data-id="${escapeHtml(s.sessionId)}" tabindex="0" role="button" draggable="true">
       <div class="kanban-card-top">
         <span class="badge cli-${cssToken(s.cliId)}">${escapeHtml(s.cliId ?? 'unknown')}</span>
         ${s.adopt ? '<span class="badge">adopt</span>' : ''}
+        ${remote ? `<span class="badge kanban-remote-badge" title="${escapeHtml(t('sessions.kanban.remoteHint', { name: remote }))}">${escapeHtml(remote)}</span>` : ''}
         <span class="kanban-card-top-right">
           <span class="kanban-card-dot" data-status="${escapeHtml(status)}" title="${escapeHtml(status)}"></span>
-          <button type="button" class="card-act kanban-card-act" data-action="history" title="${escapeHtml(t('sessions.history.title'))}" aria-label="${escapeHtml(t('sessions.history.title'))}">${ICON.history}</button>
+          ${remote ? '' : `<button type="button" class="card-act kanban-card-act" data-action="history" title="${escapeHtml(t('sessions.history.title'))}" aria-label="${escapeHtml(t('sessions.history.title'))}">${ICON.history}</button>
           <button type="button" class="card-act kanban-card-act" data-action="rename" title="${escapeHtml(t('sessions.kanban.rename'))}" aria-label="${escapeHtml(t('sessions.kanban.rename'))}">${ICON.edit}</button>
-          <button type="button" class="card-act kanban-card-act" data-action="details" title="${escapeHtml(t('sessions.details'))}" aria-label="${escapeHtml(t('sessions.details'))}">${ICON.details}</button>
+          <button type="button" class="card-act kanban-card-act" data-action="details" title="${escapeHtml(t('sessions.details'))}" aria-label="${escapeHtml(t('sessions.details'))}">${ICON.details}</button>`}
         </span>
       </div>
       <p class="kanban-card-title" title="${escapeHtml(String(s.title ?? title))}">${escapeHtml(String(title).slice(0, 140))}</p>
@@ -731,8 +840,18 @@ export function renderSessionsPage(root: HTMLElement) {
           }
           teamRows = rows.filter(r => teamChats.has(String(r.chatId)));
         }
-        teamStats.textContent = t('sessions.kanban.teamScope', { chats: teamChats.size, sessions: teamRows.length });
-        html = kanbanFlowHtml(teamRows);
+        // ── hub 团队看板合并（申晗架构：编排存团队 host）──────────────────────
+        // 本地行（实时）+ 对方部署上报的裁剪行（host 快照）；共享编排的列/排序
+        // 覆盖个人看板字段——团队视图里大家看到同一份摆放。
+        if (team) void ensureTeamBoard(team);
+        const board = (kanbanTeamBoardKey === team?.key ? kanbanTeamBoardData?.board : null) ?? {};
+        const remoteRows = (kanbanTeamBoardKey === team?.key ? kanbanTeamBoardData?.remoteRows : null) ?? [];
+        const merged = [...teamRows, ...remoteRows].map(r => {
+          const e = (board as any)[r.sessionId];
+          return e ? { ...r, kanbanColumn: e.column, kanbanPosition: e.position } : r;
+        });
+        teamStats.textContent = t('sessions.kanban.teamScope', { chats: teamChats.size, sessions: merged.length });
+        html = kanbanFlowHtml(merged);
       }
     } else {
       html = kanbanFlowHtml(rows);
@@ -1521,10 +1640,16 @@ export function renderSessionsPage(root: HTMLElement) {
         nextRow ? effectiveKanbanPosition(nextRow) : null,
       );
       members.forEach((m: any, i: number) => {
-        const prev = { column: m.kanbanColumn, position: m.kanbanPosition };
-        m.kanbanColumn = targetCol;
-        m.kanbanPosition = base + i * 0.001;
-        void persistBoardMove(m, targetCol, m.kanbanPosition, prev);
+        const pos = base + i * 0.001;
+        if (kanbanGroupBy === 'team') {
+          // 团队模式写 host 的共享编排，不动各会话的个人看板字段
+          applyTeamBoardMove(String(m.sessionId), targetCol, pos);
+        } else {
+          const prev = { column: m.kanbanColumn, position: m.kanbanPosition };
+          m.kanbanColumn = targetCol;
+          m.kanbanPosition = pos;
+          void persistBoardMove(m, targetCol, pos, prev);
+        }
       });
       lastKanbanHtml = '';
       rerender();
@@ -1532,7 +1657,8 @@ export function renderSessionsPage(root: HTMLElement) {
     }
 
     // ── 单卡搬运 ─────────────────────────────────────────────────────────────
-    const s = store.sessions.get(dragId!);
+    // 对方部署的行不在 store 里——团队看板的远程缓存兜底
+    const s = store.sessions.get(dragId!) ?? kanbanRemoteRows.get(dragId!);
     if (!s) return;
     // 已关闭会话固定在「已完成」列，只允许列内重排。
     if (s.status === 'closed' && targetCol !== 'done') return;
@@ -1545,6 +1671,12 @@ export function renderSessionsPage(root: HTMLElement) {
       prevRow ? effectiveKanbanPosition(prevRow) : null,
       nextRow ? effectiveKanbanPosition(nextRow) : null,
     );
+    if (kanbanGroupBy === 'team') {
+      applyTeamBoardMove(String(s.sessionId), targetCol, position);
+      lastKanbanHtml = '';
+      rerender();
+      return;
+    }
     const prev = { column: s.kanbanColumn, position: s.kanbanPosition };
     s.kanbanColumn = targetCol;
     s.kanbanPosition = position;
@@ -1639,6 +1771,18 @@ export function renderSessionsPage(root: HTMLElement) {
 
   filtersForm.addEventListener('input', rerender);
   store.on(rerender);
+  // 团队看板 30s 软刷新（拉对方部署的会话快照与共享编排）；页面切走后
+  // kanban 脱离 DOM，定时器自清。
+  const teamBoardTimer = setInterval(() => {
+    if (!document.body.contains(kanban)) {
+      clearInterval(teamBoardTimer);
+      return;
+    }
+    if (viewMode === 'kanban' && kanbanGroupBy === 'team') {
+      lastKanbanHtml = '';
+      rerender();
+    }
+  }, 30_000);
   rerender();
   // bot 友好名 / 群聊标题异步解析，回来后补一次重绘（首帧先显示原值）
   void loadNameMaps().then(rerender);

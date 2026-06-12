@@ -24,7 +24,7 @@ import { handleConnectorApi } from './dashboard/connector-api.js';
 import { redactGroupsForPublic, redactSchedulesForPublic } from './dashboard/public-redact.js';
 import { handleWebhookRoute } from './dashboard/webhook-routes.js';
 import { handleFederationApi } from './dashboard/federation-api.js';
-import { handleFederationSpokeApi, syncAllMemberships } from './dashboard/federation-spoke-api.js';
+import { handleFederationSpokeApi, syncAllMemberships, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { CLI_OPTIONS, resolveCliId } from './setup/bot-config-editor.js';
@@ -32,6 +32,7 @@ import { invalidWorkingDirs } from './utils/working-dir.js';
 import { mergeDashboardConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig } from './global-config.js';
 import { isLocale } from './i18n/types.js';
 import { isLocalDevInstall } from './utils/install-info.js';
+import { listTeamReports, readTeamBoard, setTeamBoardEntry } from './services/team-board-store.js';
 import type { CliId } from './adapters/cli/types.js';
 import type { ConnectorDefinition } from './services/connector-store.js';
 
@@ -624,6 +625,25 @@ const server = createServer(async (req, res) => {
       res.writeHead(upstream.status, { 'content-type': 'application/json' });
       res.end(await upstream.text());
       return;
+    }
+
+    // ── 团队看板（本地托管团队，host=本部署）：共享编排 + 成员上报快照 ──────
+    // authed-only（不在公开读白名单）。远程团队走 /api/team/remote-board 代理。
+    let mBoard: RegExpMatchArray | null;
+    if (req.method === 'GET' && (mBoard = url.pathname.match(/^\/api\/team\/board\/local\/([^/]+)$/))) {
+      const teamId = decodeURIComponent(mBoard[1]);
+      return jsonRes(res, 200, {
+        ok: true,
+        board: readTeamBoard(config.session.dataDir, teamId),
+        reports: listTeamReports(config.session.dataDir, teamId),
+      });
+    }
+    if (req.method === 'POST' && (mBoard = url.pathname.match(/^\/api\/team\/board\/local\/([^/]+)\/move$/))) {
+      const teamId = decodeURIComponent(mBoard[1]);
+      const moveBody = await readJsonBody(req) as any;
+      const entry = setTeamBoardEntry(config.session.dataDir, teamId, String(moveBody?.sessionId ?? ''), moveBody?.column, moveBody?.position);
+      if (!entry) return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+      return jsonRes(res, 200, { ok: true, entry });
     }
 
     // 看板放置 / 重命名：带 JSON body 的会话写操作，原样转发给 owner daemon。
@@ -1276,7 +1296,11 @@ listenWithProbe({
 // Federation: periodically push this deployment's bots + heartbeat to every hub
 // it has joined (best-effort; no-op when not federated). Keeps remote rosters fresh.
 const federationSync = setInterval(() => {
-  syncAllMemberships(config.session.dataDir, fetch, liveBots()).catch(() => { /* best-effort */ });
+  // sessionsProvider：顺带把本部署在各团队协作群里的会话裁剪行上报给团队 host
+  // （hub 在 sync 响应里下发协作群清单，详见 syncAllMemberships）。
+  // aggregator Row 是宽松索引类型，实际为 SessionRow（含 chatId 等字段）
+  syncAllMemberships(config.session.dataDir, fetch, liveBots(), () => aggregator.getSessions() as unknown as TeamSessionRowLike[])
+    .catch(() => { /* best-effort */ });
 }, 2 * 60 * 1000);
 federationSync.unref();
 

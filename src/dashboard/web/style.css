@@ -1342,6 +1342,18 @@ button.primary {
   cursor: default;
 }
 
+/* 对方部署的会话卡：来源徽章 + 虚线边框区分快照身份 */
+.kanban-remote-badge {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-muted));
+  color: var(--accent-strong);
+  white-space: nowrap;
+  flex: none;
+}
+
+.kanban-card-remote {
+  border-style: dashed;
+}
+
 /* 机器人视角：bot 多时列不再无限压缩——固定列宽 + 容器横向滚动 */
 .sessions-kanban.kanban-mode-bot .kanban-column {
   flex: 0 0 264px;

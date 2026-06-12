@@ -4,6 +4,14 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { listTeamGroups, recordTeamGroup } from '../src/services/team-groups-store.js';
 import {
+  listTeamReports,
+  readTeamBoard,
+  recordTeamSessions,
+  sanitizeReportedSessions,
+  setTeamBoardEntry,
+  TEAM_REPORT_MAX_SESSIONS,
+} from '../src/services/team-board-store.js';
+import {
   KANBAN_COLUMN_IDS,
   normalizeKanbanColumn,
   normalizeKanbanPosition,
@@ -115,6 +123,49 @@ describe('team-groups-store', () => {
     recordTeamGroup(dir, '', 'oc_1');
     recordTeamGroup(dir, 'team-a', '');
     expect(listTeamGroups(dir)).toEqual([]);
+  });
+});
+
+describe('team-board-store', () => {
+  let dir: string;
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it('writes and reads shared board entries with validation', () => {
+    dir = mkdtempSync(join(tmpdir(), 'team-board-'));
+    expect(setTeamBoardEntry(dir, 't1', 'sid-1', 'in_progress', 1024, 5)).toEqual({ column: 'in_progress', position: 1024, updatedAt: 5 });
+    expect(setTeamBoardEntry(dir, 't1', 'sid-1', 'nope', 1)).toBeNull();
+    expect(setTeamBoardEntry(dir, 't1', 'sid-1', 'done', Number.NaN)).toBeNull();
+    expect(setTeamBoardEntry(dir, 't1', '', 'done', 1)).toBeNull();
+    expect(readTeamBoard(dir, 't1')).toEqual({ 'sid-1': { column: 'in_progress', position: 1024, updatedAt: 5 } });
+    expect(readTeamBoard(dir, 't2')).toEqual({});
+  });
+
+  it('records per-deployment session reports, overwriting previous snapshots', () => {
+    dir = mkdtempSync(join(tmpdir(), 'team-board-'));
+    recordTeamSessions(dir, 't1', 'dep-a', 'A 部署', [
+      { sessionId: 's1', chatId: 'oc_1', botName: 'B', cliId: 'codex', status: 'working', lastMessageAt: 1 },
+    ], 100);
+    recordTeamSessions(dir, 't1', 'dep-a', 'A 部署', [], 200);
+    const reports = listTeamReports(dir, 't1');
+    expect(reports).toHaveLength(1);
+    expect(reports[0].reportedAt).toBe(200);
+    expect(reports[0].sessions).toEqual([]);
+  });
+
+  it('sanitizes reported sessions: whitelists fields, drops invalid, caps count', () => {
+    const raw: any[] = [
+      { sessionId: 's1', chatId: 'oc_1', botName: 'B', cliId: 'codex', status: 'working', title: 'x', lastMessageAt: 9, webPort: 1234, workingDir: '/secret' },
+      { sessionId: '', chatId: 'oc_1' },
+      { chatId: 'oc_1' },
+      'junk',
+    ];
+    const out = sanitizeReportedSessions(raw);
+    expect(out).toHaveLength(1);
+    expect(out[0]).not.toHaveProperty('webPort');
+    expect(out[0]).not.toHaveProperty('workingDir');
+    expect(out[0].title).toBe('x');
+    const many = Array.from({ length: TEAM_REPORT_MAX_SESSIONS + 50 }, (_, i) => ({ sessionId: `s${i}`, chatId: 'oc' }));
+    expect(sanitizeReportedSessions(many)).toHaveLength(TEAM_REPORT_MAX_SESSIONS);
   });
 });
 
