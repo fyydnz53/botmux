@@ -219,6 +219,7 @@ function pageHtml(): string {
         <p>${t('sessions.subtitle')}</p>
       </div>
       <div class="sessions-view-controls">
+        <span id="kanban-team-stats" class="kanban-team-stats" hidden></span>
         <select id="kanban-team" class="kanban-team-select" aria-label="${t('sessions.kanban.groupTeam')}" hidden></select>
         <div class="segmented kanban-groupby" id="kanban-groupby" role="group" aria-label="${t('sessions.kanban.groupBy')}" hidden>
           <button type="button" data-groupby="flow">${t('sessions.kanban.groupFlow')}</button>
@@ -294,6 +295,7 @@ export function renderSessionsPage(root: HTMLElement) {
   const historyModal = root.querySelector<HTMLDialogElement>('#history-modal')!;
   const groupByBox = root.querySelector<HTMLElement>('#kanban-groupby')!;
   const teamSelect = root.querySelector<HTMLSelectElement>('#kanban-team')!;
+  const teamStats = root.querySelector<HTMLElement>('#kanban-team-stats')!;
   const viewButtons = root.querySelectorAll<HTMLButtonElement>('.sessions-view-toggle [data-view]');
 
   const selected = new Set<string>();
@@ -675,18 +677,32 @@ export function renderSessionsPage(root: HTMLElement) {
         void loadKanbanTeams();
       } else {
         const team = kanbanTeams.find(tm => tm.key === kanbanTeamKey) ?? kanbanTeams[0];
-        // 「团队群」过滤：会话所在群含该团队任一 bot 即保留——同群里其他 bot
-        // 的会话也展示（这正是协作视角要看的）。群矩阵缺失时退回按会话归属 bot。
-        const teamRows = team
-          ? rows.filter(r => {
-              const inChat = kanbanChatBots?.get(String(r.chatId));
-              if (inChat) {
-                for (const id of team.botIds) if (inChat.has(id)) return true;
-                return false;
+        // 「团队群」= 协作群：群内同时在场该团队 ≥2 个成员 bot（手动拉的、
+        // dashboard 建的都覆盖）。只含 1 个 bot 的普通工作群不算——否则全量
+        // bot 的默认团队会匹配所有群，筛选完全失效。单 bot 团队退回 ≥1。
+        // 命中群里**所有** bot 的会话都展示（协作视角）。矩阵缺失退回按归属 bot。
+        let teamRows: any[] = [];
+        let teamChatCount = 0;
+        if (team) {
+          const threshold = team.botIds.size >= 2 ? 2 : 1;
+          if (kanbanChatBots) {
+            const teamChats = new Set<string>();
+            for (const [chatId, bots] of kanbanChatBots) {
+              let n = 0;
+              for (const id of team.botIds) {
+                if (bots.has(id) && ++n >= threshold) {
+                  teamChats.add(chatId);
+                  break;
+                }
               }
-              return team.botIds.has(String(r.larkAppId));
-            })
-          : [];
+            }
+            teamChatCount = teamChats.size;
+            teamRows = rows.filter(r => teamChats.has(String(r.chatId)));
+          } else {
+            teamRows = rows.filter(r => team.botIds.has(String(r.larkAppId)));
+          }
+        }
+        teamStats.textContent = t('sessions.kanban.teamScope', { chats: teamChatCount, sessions: teamRows.length });
         html = kanbanFlowHtml(teamRows);
       }
     } else {
@@ -1000,6 +1016,7 @@ export function renderSessionsPage(root: HTMLElement) {
     });
     groupByBox.hidden = viewMode !== 'kanban';
     teamSelect.hidden = !(viewMode === 'kanban' && kanbanGroupBy === 'team');
+    teamStats.hidden = teamSelect.hidden || !kanbanTeamsLoaded;
     groupByBox.querySelectorAll<HTMLButtonElement>('[data-groupby]').forEach(btn => {
       const active = btn.dataset.groupby === kanbanGroupBy;
       btn.classList.toggle('active', active);

@@ -1318,6 +1318,13 @@ button.primary {
   outline-offset: 1px;
 }
 
+/* 团队筛选范围统计：让"筛掉了什么"可见 */
+.kanban-team-stats {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* 机器人视角：bot 多时列不再无限压缩——固定列宽 + 容器横向滚动 */
 .sessions-kanban.kanban-mode-bot .kanban-column {
   flex: 0 0 264px;
