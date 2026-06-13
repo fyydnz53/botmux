@@ -244,16 +244,17 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     // 清掉后失败 target 可重新走 /grant 或自助申请；失败清单下面在原线程明确告知 owner，
     // 不做「撤卡 + 静默失败 + pending 永久卡住」。
     for (const f of failed) clearPending(larkAppId, grantChatId, f.openId);
-    const target = granted;
+    // 一次查通讯录判定哪些 grantee 是真人（vs bot），结果同时供下面两处复用：
+    //   1. observed 花名册自动登记（只收 bot，剔真人）；
+    //   2. 通知卡 @ 渲染（只 @ 真人，bot 用纯文本名字 —— 见下方注释）。
+    // 缺 contact 读权限/查询瞬时失败 → 一律按 bot 处理（false）：登记侧沿用历史「全部登记」回退，
+    // 通知侧则把对方当 bot 不 @（宁可少 @ 一次真人，也不误唤醒 bot 拉空会话）。
+    const humanFlags = await Promise.all(granted.map(id => isHumanOpenId(larkAppId, id).catch(() => false)));
     // /grant @bot 成功后顺带把「bot」目标登记进 observed 花名册（等价内部跑一次 /introduce），
     // 授权 + 可点名一步到位。写的是 observed-bots-store（让本 daemon 能 @ 回对方），不影响
     // isKnownPeerBot 接收闸（那查的是 cross-ref，两套独立存储），零额外路由权。best-effort。
     // 真人**不**登记：查通讯录确认是真人就剔除，避免污染 <available_bots> 误导模型。
-    // 注意：grant 自动登记是新增路径，缺 contact 读权限/查询瞬时失败时真人会被当 bot 误登记
-    // （/introduce 同款过滤但本就登记全部，对它无回退损失）。该 scope 已是 critical 且启动自检
-    // 缺失即 DM 管理员，把这条污染面收敛到「管理员未按提示开权限」的窗口（见 isHumanOpenId）。
     try {
-      const humanFlags = await Promise.all(granted.map(id => isHumanOpenId(larkAppId, id).catch(() => false)));
       const botEntries = granted
         .map((id, i) => ({ id, human: humanFlags[i] }))
         .filter(x => !x.human)
@@ -266,6 +267,8 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     } catch (err) {
       logger.warn(`grant auto-introduce (observed) failed (grant still applied): ${err}`);
     }
+    // 通知卡的 grantee 渲染参数：bot 只用纯文本名字（不 <at>，否则唤醒对方 bot 误拉空会话），真人 @ 点名。
+    const notifyTargets = granted.map((id, i) => ({ openId: id, name: idToName.get(id) || undefined, isBot: !humanFlags[i] }));
     // 授权成功后：
     //   1. 先同步返回 callback 响应（in-place patch 成「已授权」终态卡），避免飞书等待
     //      太久或 deleteMessage 与 callback 响应竞态导致客户端 300000 报错；
@@ -285,7 +288,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       Promise.resolve()
         .then(async () => {
           try {
-            await replyMessage(larkAppId, cardMessageId, buildGrantNotifyCard(kind, target, loc, quota), 'interactive', replyInThread);
+            await replyMessage(larkAppId, cardMessageId, buildGrantNotifyCard(kind, notifyTargets, loc, quota), 'interactive', replyInThread);
           } catch (err) {
             logger.warn(`grant notify failed (grant still applied): ${err}`);
           }
