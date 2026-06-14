@@ -268,4 +268,30 @@ describe('listChatBotMembers', () => {
     });
     expect(bots.find(b => b.openId === 'ou_stale')).toBeUndefined();
   });
+
+  it('prefers a same-name bot-openids cross-ref over a stale observed external handle', async () => {
+    state.dataDir = mkdtempSync(join(tmpdir(), 'botmux-list-chat-bots-'));
+    writeFileSync(join(state.dataDir, 'bots-info.json'), '[]');
+    writeFileSync(join(state.dataDir, 'bot-openids-cli_self.json'), JSON.stringify({
+      NasCodex: 'ou_current_cross_ref',
+    }));
+    const now = Date.now();
+    writeFileSync(join(state.dataDir, 'observed-bots-cli_self-oc_chat.json'), JSON.stringify({
+      'ou_stale_observed': { name: 'NasCodex', source: 'introduce', firstSeenAt: now, lastSeenAt: now },
+    }));
+
+    const { listChatBotMembers } = await import('../src/im/lark/client.js');
+    const bots = await listChatBotMembers('cli_self', 'oc_chat');
+
+    const nasEntries = bots.filter(b => b.displayName === 'NasCodex');
+    expect(nasEntries).toHaveLength(1);
+    expect(nasEntries[0]).toMatchObject({
+      larkAppId: '',
+      openId: 'ou_current_cross_ref',
+      source: 'introduce',
+      mentionable: true,
+      mentionSource: 'cross-ref',
+    });
+    expect(bots.find(b => b.openId === 'ou_stale_observed')).toBeUndefined();
+  });
 });

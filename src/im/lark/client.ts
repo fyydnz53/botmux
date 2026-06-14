@@ -1201,8 +1201,8 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
         latestObservedByName.set(o.name, o);
       }
     }
-    const seenOpenIds = new Set(configured.map(b => b.openId));
     const norm = (s: string) => s.trim().toLowerCase();
+    const seenOpenIds = new Set(configured.map(b => b.openId));
     const byName = new Map<string, number[]>();
     configured.forEach((b, i) => {
       const k = norm(b.displayName);
@@ -1211,28 +1211,31 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
     });
 
     for (const o of latestObservedByName.values()) {
-      if (seenOpenIds.has(o.openId)) continue;
+      const crossHit = crossRef.get(norm(o.name));
+      const openId = crossHit ?? o.openId;
+      const mentionSource: ChatBotMember['mentionSource'] = crossHit ? 'cross-ref' : 'observed';
+      if (seenOpenIds.has(openId)) continue;
       const matches = byName.get(norm(o.name)) ?? [];
       if (matches.length === 1) {
         const row = configured[matches[0]];
         // Upgrade only if not already a reliable cross-ref handle.
         if (row.mentionSource !== 'cross-ref') {
-          configured[matches[0]] = { ...row, openId: o.openId, mentionable: true, mentionSource: 'observed' };
-          seenOpenIds.add(o.openId);
+          configured[matches[0]] = { ...row, openId, mentionable: true, mentionSource };
+          seenOpenIds.add(openId);
         }
         continue; // matched → never also append as an external duplicate
       }
       configured.push({
         larkAppId: '',
-        openId: o.openId,
+        openId,
         name: o.name,
         displayName: o.name,
         source: 'introduce',
         hasTeamRole: false,
         mentionable: true,
-        mentionSource: 'observed',
+        mentionSource,
       });
-      seenOpenIds.add(o.openId);
+      seenOpenIds.add(openId);
     }
   } catch (err) {
     logger.debug(`Failed to load observed bots for ${chatId}: ${err}`);
