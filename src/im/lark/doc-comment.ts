@@ -344,9 +344,9 @@ export async function replyToDocComment(
   file: ResolvedDocFile,
   commentId: string,
   text: string,
+  mentionOpenId?: string,
 ): Promise<{ replyId?: string; commentId?: string }> {
-  // 末尾追加隐形哨兵 → 事件侧 hasBotSentinel 兜底跳过自触发。
-  const elements: CommentElement[] = [{ type: 'text_run', text_run: { text: text + BOT_REPLY_SENTINEL } }];
+  const elements = buildCommentElements(text, mentionOpenId);
   let res: any;
   try {
     res = await driveApiCall(larkAppId, {
@@ -361,7 +361,7 @@ export async function replyToDocComment(
     // 退回新建一条全文评论，保证 bot 的答复总能落到文档（不嵌套但仍在评论区）。
     if (isReplyNotAllowed(err)) {
       logger.warn(`[doc-comment] comment=${commentId.slice(0, 12)} 不允许回复，退回新建全文评论`);
-      const c = await createDocComment(larkAppId, file, text);
+      const c = await createDocComment(larkAppId, file, text, mentionOpenId);
       return { replyId: c.replyId, commentId: c.commentId };
     }
     throw err;
@@ -370,7 +370,7 @@ export async function replyToDocComment(
   if (res?.code !== 0) {
     if (isReplyNotAllowed(res)) {
       logger.warn(`[doc-comment] comment=${commentId.slice(0, 12)} 不允许回复(code=${res?.code})，退回新建全文评论`);
-      const c = await createDocComment(larkAppId, file, text);
+      const c = await createDocComment(larkAppId, file, text, mentionOpenId);
       return { replyId: c.replyId, commentId: c.commentId };
     }
     throw new Error(`回复评论 失败: ${res?.msg ?? 'unknown'} (code: ${res?.code})`);
@@ -379,6 +379,18 @@ export async function replyToDocComment(
   if (replyId) markBotAuthoredReply(replyId);
   logger.info(`[doc-comment] replied to comment=${commentId.slice(0, 12)} reply=${String(replyId ?? '').slice(0, 12)} on file=${file.fileToken.slice(0, 12)} (${text.length} chars)`);
   return { replyId };
+}
+
+/** 构造评论内容元素：可选在开头 @ 某人（person 元素，user_id=open_id），末尾追加
+ *  隐形哨兵供事件侧自触发兜底识别。 */
+function buildCommentElements(text: string, mentionOpenId?: string): CommentElement[] {
+  const els: CommentElement[] = [];
+  if (mentionOpenId) {
+    els.push({ type: 'person', person: { user_id: mentionOpenId } });
+    els.push({ type: 'text_run', text_run: { text: ' ' } });
+  }
+  els.push({ type: 'text_run', text_run: { text: text + BOT_REPLY_SENTINEL } });
+  return els;
 }
 
 /** 识别飞书"该评论不允许回复"的错误（code 1069302 或消息含 does not allow replies）。 */
@@ -395,8 +407,9 @@ export async function createDocComment(
   larkAppId: string,
   file: ResolvedDocFile,
   text: string,
+  mentionOpenId?: string,
 ): Promise<{ commentId: string; replyId?: string }> {
-  const elements: CommentElement[] = [{ type: 'text_run', text_run: { text: text + BOT_REPLY_SENTINEL } }];
+  const elements = buildCommentElements(text, mentionOpenId);
   const res = await driveApiCall(larkAppId, {
     method: 'POST',
     path: `/open-apis/drive/v1/files/${encodeURIComponent(file.fileToken)}/comments`,

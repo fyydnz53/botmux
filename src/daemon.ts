@@ -3348,7 +3348,7 @@ async function handleDocComment(ctx: DocCommentContext): Promise<void> {
     replyToOpenId: ctx.authorOpenId,
     replyToName: sender?.name,
   });
-  const docTarget = { fileToken: sub.fileToken, fileType: sub.fileType, commentId, replyToName: sender?.name, turnId };
+  const docTarget = { fileToken: sub.fileToken, fileType: sub.fileType, commentId, replyToName: sender?.name, replyToOpenId: ctx.authorOpenId, turnId };
 
   const dsBotCfg = getBot(ds.larkAppId).config;
   const selfBot = getBot(ds.larkAppId);

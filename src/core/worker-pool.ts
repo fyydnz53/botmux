@@ -2276,10 +2276,11 @@ function deliverFinalOutput(
       const docTurn = ds.docCommentTurns?.get(msg.turnId);
       if (docTurn) {
         const loc = localeForBot(ds.larkAppId);
-        // 嵌套回复到用户那条评论 thread（已挂在其下，无需再 ↪ 前缀）。
+        // 嵌套回复到用户那条评论 thread（已挂在其下，无需再 ↪ 前缀）。这是兜底路径
+        // （模型没显式 botmux send），默认 @ 回原评论人，仅首块加。
         const chunks = chunkCommentText(msg.content);
-        for (const chunk of chunks) {
-          await replyToDocComment(ds.larkAppId, { fileToken: docTurn.fileToken, fileType: docTurn.fileType }, docTurn.commentId, chunk);
+        for (let i = 0; i < chunks.length; i++) {
+          await replyToDocComment(ds.larkAppId, { fileToken: docTurn.fileToken, fileType: docTurn.fileType }, docTurn.commentId, chunks[i], i === 0 ? docTurn.replyToOpenId : undefined);
         }
         // 收尾飞书侧占位卡（streaming-disabled 会话），避免停在「处理中」。
         // streaming 卡（若开启）会在 idle 自行冻结，无需在此处理。

@@ -1525,7 +1525,7 @@ interface SessionData {
   quoteTargetId?: string;
   currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string };
   /** 文档评论入口当前轮回评论落点（见 Session.currentDocCommentTarget in types.ts）。 */
-  currentDocCommentTarget?: { fileToken: string; fileType: string; commentId: string; replyToName?: string; turnId: string };
+  currentDocCommentTarget?: { fileToken: string; fileType: string; commentId: string; replyToName?: string; replyToOpenId?: string; turnId: string };
   quoteTargetSenderOpenId?: string;
   quoteTargetSenderIsBot?: boolean;
   pendingResponseCardId?: string;
@@ -3335,10 +3335,19 @@ async function cmdSend(rest: string[]): Promise<void> {
     const appId = s.larkAppId!;
     const loc = localeForBot(appId);
     try {
+      // @ 落点：--mention-back → 回 @ 原评论人；--mention <open_id[:name]> → @ 指定人；
+      // 否则（--no-mention / 无）不 @。文档评论里靠 person 元素渲染 @，仅首块加。
+      let docMentionOpenId: string | undefined;
+      if (mentionBack) docMentionOpenId = docTarget.replyToOpenId;
+      else if (mentionArgs.length > 0) {
+        const first = mentionArgs[0];
+        const idx = first.indexOf(':');
+        docMentionOpenId = (idx > 0 ? first.slice(0, idx) : first).trim() || undefined;
+      }
       // 嵌套回复到用户那条评论 thread（已挂其下，无需 ↪ 前缀）。
       const chunks = chunkCommentText(content);
-      for (const chunk of chunks) {
-        await replyToDocComment(appId, { fileToken: docTarget.fileToken, fileType: docTarget.fileType }, docTarget.commentId, chunk);
+      for (let i = 0; i < chunks.length; i++) {
+        await replyToDocComment(appId, { fileToken: docTarget.fileToken, fileType: docTarget.fileType }, docTarget.commentId, chunks[i], i === 0 ? docMentionOpenId : undefined);
       }
       // 写 bridge send marker → 抑制 worker 的 final_output 兜底（否则会再补一条评论）。
       try {
