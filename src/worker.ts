@@ -3775,6 +3775,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // bin 走 PATH 解析），无需 wrapper 脚本、跨系统。aiden x claude 形态会剥掉 aiden 拒收的
   // --settings（见 buildWrappedLaunch）。与文件沙盒互斥：沙盒已把命令重写成 bwrap，叠加
   // 前缀会破坏隔离，故 sandboxOn 时跳过并告警（网关 + oncall 沙盒本就不是合理组合）。
+  // CJADK_INTERACTIVE is a cjadk-only knob we set on the cjadk wrapper branch
+  // below. Strip any value inherited from the daemon's own env first so a
+  // daemon launched under `cjadk feishu` (which exports it) can't leak it via
+  // the tmux env allowlist into EVERY bot's pane — only the cjadk branch should
+  // ever (re)set it. Harmless for non-cjadk CLIs (they don't read it), but this
+  // keeps the behaviour intentional rather than ambient. (Codex review note.)
+  delete (childEnv as Record<string, string>).CJADK_INTERACTIVE;
+
   if (cfg.wrapperCli && cfg.wrapperCli.trim()) {
     if (sandboxOn) {
       log(`wrapperCli="${cfg.wrapperCli}" ignored: file sandbox enabled and takes precedence (cannot combine launch prefix with bwrap)`);
